@@ -1,0 +1,12 @@
+# SwiftPM build output — regenerated per machine.
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode-specific
+*.xcodeproj/
+DerivedData/
+xcuserdata/
+
+# macOS
+.DS_Store
