@@ -2,10 +2,13 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.0.0 — bank-grade.** Modeled line-for-line on the
+> **Status: v1.0.2 — bank-grade.** Modeled line-for-line on the
 > Web/Node/React Native SDKs. All three pillars (analytics events,
 > error capture, entitlement gating) live in one Swift Package
-> with zero runtime dependencies.
+> with zero runtime dependencies. v1.0.2 adds `Crossdeck.current` —
+> a process-singleton accessor for service / view-model / UIKit
+> call sites where `@Environment(\.crossdeck)` isn't reachable.
+> See [`CHANGELOG.md`](./CHANGELOG.md) for the full release notes.
 
 ## Three pillars
 
@@ -35,29 +38,75 @@ dependencies: [
 
 ## Quickstart
 
+`Crossdeck.start(...)` throws on misconfiguration (`invalid_secret_key`, `env_mismatch`, `missing_app_id`). Wrap in `do/catch` and store as `Optional` so a typo'd key never crashes a customer's launch:
+
 ```swift
+import SwiftUI
 import Crossdeck
 
-let cd = Crossdeck.start(options: CrossdeckOptions(
-    endpoint: URL(string: "https://api.cross-deck.com/v1/events")!,
-    writeKey: "ck_live_..."
-))
+@main
+struct YourApp: App {
+    let cd: Crossdeck?
 
+    init() {
+        cd = Self.startCrossdeck()
+    }
+
+    var body: some Scene {
+        WindowGroup { ContentView().environment(\.crossdeck, cd) }
+    }
+
+    private static func startCrossdeck() -> Crossdeck? {
+        // Drive both from build configuration — Debug builds can never
+        // accidentally embed a live key. Publishable-key prefix is
+        // authoritative: cd_pub_live_ ↔ .production, cd_pub_test_ ↔
+        // .sandbox. Mismatch throws env_mismatch.
+        #if DEBUG
+        let publicKey = "cd_pub_test_..."
+        let environment: Environment = .sandbox
+        #else
+        let publicKey = "cd_pub_live_..."
+        let environment: Environment = .production
+        #endif
+        do {
+            return try Crossdeck.start(options: CrossdeckOptions(
+                appId: "app_ios_xxx",
+                publicKey: publicKey,
+                environment: environment
+            ))
+        } catch {
+            assertionFailure("[Crossdeck] start failed: \(error)")
+            return nil
+        }
+    }
+}
+```
+
+Then anywhere in your app. Inside SwiftUI views use `@Environment(\.crossdeck)`; from services / view models / non-SwiftUI surfaces use the **`Crossdeck.current`** static accessor (v1.0.2+):
+
+```swift
 // Track an event
-try? cd.track("paywall_seen", properties: ["variant": "annual"])
+try? cd?.track("paywall_seen", properties: ["variant": "annual"])
 
-// Identify a customer
-try? cd.identify(customerId: "cus_abc123", traits: ["plan": "pro"])
+// Identify after sign-in. userId is YOUR auth provider's stable id
+// (Firebase Auth uid, Sign In with Apple userIdentifier, Auth0 sub,
+// Supabase id, etc.) — never a placeholder.
+try? cd?.identify(userId: user.id, email: user.email, traits: ["plan": "pro"])
+
+// Sign-out — wipes identity + entitlement cache + super-properties +
+// breadcrumbs. Regenerates anonymousId for shared-device privacy.
+try? cd?.reset()
+
+// Synchronous paywall gate — safe inside a SwiftUI body { }
+if cd?.isEntitled("pro") == true { showProFeatures() }
 
 // Manual error capture
-do {
-    try riskyOperation()
-} catch {
-    cd.captureError(error)
-}
+do { try riskyOperation() }
+catch { cd?.captureError(error, handled: true) }
 
-// Drain before app shutdown
-await cd.flush()
+// From a service / view model / AppDelegate (no @Environment access):
+Crossdeck.current?.track("background_refresh_completed")
+if Crossdeck.current?.isEntitled("pro") == true { … }
 ```
 
 ## Bank-grade contracts
@@ -92,8 +141,8 @@ Web, Node, and React Native SDKs.
 
 ### Entitlements
 
-- **Customer-scoped.** The cache key is `(customerId, entitlements)`.
-  A read for a different customer returns `nil` — never leaks a
+- **Customer-scoped.** The cache key is `(developerUserId, entitlements)`.
+  A read for a different customer returns `false` — never leaks a
   prior user's entitlements after identify.
 - **Synchronous read.** `isEntitled(...)` returns instantly from
   cache. Paywall gates do not block on network.
@@ -103,16 +152,21 @@ Web, Node, and React Native SDKs.
 - **`anonymousId` persists across launches** until `reset()`.
 - **`reset()` regenerates `anonymousId`** so the next anonymous
   session is not linked to the prior identified user.
-- **Unconditional entitlement clear on identify** — a new
-  customerId always wipes the prior entitlement snapshot.
+- **Unconditional entitlement clear on identify** — every call
+  wipes the prior entitlement snapshot, even a same-id re-identify.
+  A tiny redundant cache rebuild is cheaper than a leak.
+- **Repeated identify is SAFE but not free** — each call clears the
+  entitlement cache and re-fires `/identity/alias`. Most apps gate
+  with a `lastIdentifiedUserId` check.
 
 ### Privacy
 
 - **PII scrubber on by default.** `<email>` and `<card>` tokens
   replace anything that looks like an email or payment card. Walks
   nested dictionaries and arrays recursively.
-- **Default-deny consent.** Analytics + errors both off until you
-  call `setConsent(...)`.
+- **Default-GRANT consent.** Analytics + errors both on out of the
+  box — matches the Web/Node/RN platform contract. Wire
+  `setConsent(...)` for an opt-out flow (cookie banner, EU age gate).
 
 ## Platforms
 
