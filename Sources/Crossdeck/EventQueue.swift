@@ -35,8 +35,20 @@ public struct WireEvent: Sendable, Codable {
     public let name: String
     public let timestamp: Date
     public let properties: [String: AnyCodable]
+
+    // Canonical Web/Node/RN bank-grade rule: ship EVERY known
+    // identity axis on every event. The backend's dedup + merge
+    // uses whichever axes are present; dropping any breaks
+    // warehouse uniques after an identify+alias round-trip.
     public let anonymousId: String
-    public let customerId: String?
+    /// The consumer's auth-provider user ID. NOT the same as
+    /// `crossdeckCustomerId`.
+    public let developerUserId: String?
+    /// The canonical Crossdeck-side record handle (`cdcust_…`),
+    /// returned from `/identity/alias` and persisted in `Identity`.
+    /// Stamped on every event when known so server-side dedup
+    /// converges immediately after an identify round-trip.
+    public let crossdeckCustomerId: String?
 
     public init(
         id: String,
@@ -44,14 +56,16 @@ public struct WireEvent: Sendable, Codable {
         timestamp: Date,
         properties: [String: AnyCodable],
         anonymousId: String,
-        customerId: String?
+        developerUserId: String?,
+        crossdeckCustomerId: String? = nil
     ) {
         self.id = id
         self.name = name
         self.timestamp = timestamp
         self.properties = properties
         self.anonymousId = anonymousId
-        self.customerId = customerId
+        self.developerUserId = developerUserId
+        self.crossdeckCustomerId = crossdeckCustomerId
     }
 }
 
@@ -127,6 +141,20 @@ public struct EventQueueConfig: Sendable {
     public init() {}
 }
 
+/// Batch envelope context — `appId` + `environment` (+ the SDK
+/// identifier baked in from `SDK.name` / `SDK.version`) attached
+/// to every batch POST. Matches the NorthStar §13.1 envelope the
+/// backend validator expects.
+public struct EventQueueEnvelope: Sendable {
+    public let appId: String
+    public let environment: Environment
+
+    public init(appId: String, environment: Environment) {
+        self.appId = appId
+        self.environment = environment
+    }
+}
+
 public struct QueueStats: Sendable {
     public let buffered: Int
     public let pending: Int
@@ -144,27 +172,36 @@ private struct PendingBatch: Sendable, Codable {
 public actor EventQueue {
     private let http: HTTPClient
     private let storage: Storage
+    private let envelope: EventQueueEnvelope
     private let logger: DebugLogger
     private let onPermanentFailure: PermanentFailureHandler?
     private let config: EventQueueConfig
+
+    /// One-shot guard for `sdk.first_event_sent`. The dashboard
+    /// onboarding checklist fires when it sees this signal, so it
+    /// must fire EXACTLY ONCE per process lifetime (matches Web/Node/RN
+    /// semantics). Subsequent flushes emit `sdk.queue_persisted`.
+    private var firstEventSentFired: Bool = false
 
     private var buffer: [WireEvent] = []
     private var pendingBatch: PendingBatch?
     private var flushTask: Task<Void, Never>?
     private var nextRetryAt: Date?
 
-    private let pendingStorageKey = "queue.pending"
-    private let bufferStorageKey = "queue.buffer"
+    private let pendingStorageKey = "queue.pending.v1"
+    private let bufferStorageKey = "queue.buffer.v1"
 
     public init(
         http: HTTPClient,
         storage: Storage,
+        envelope: EventQueueEnvelope,
         logger: @escaping DebugLogger = noopDebugLogger,
         onPermanentFailure: PermanentFailureHandler? = nil,
         config: EventQueueConfig = EventQueueConfig()
     ) {
         self.http = http
         self.storage = storage
+        self.envelope = envelope
         self.logger = logger
         self.onPermanentFailure = onPermanentFailure
         self.config = config
@@ -196,11 +233,11 @@ public actor EventQueue {
             // preserved. Web/RN SDKs do the same.
             let overflow = buffer.count - config.maxBufferSize + 1
             buffer.removeFirst(overflow)
-            logger(.queueOverflow, ["dropped": String(overflow)])
+            logger(.sdkFlushPermanentFailure, ["dropped": String(overflow)])
         }
         buffer.append(event)
         persistBuffer()
-        logger(.queueEnqueue, ["name": event.name, "buffered": String(buffer.count)])
+        logger(.sdkQueuePersisted, ["name": event.name, "buffered": String(buffer.count)])
 
         if buffer.count >= config.batchSize {
             await flush()
@@ -229,7 +266,7 @@ public actor EventQueue {
         // Respect scheduled retry delay.
         if let when = batch.nextRetryAt, when > Date() { return }
 
-        logger(.queueFlushStart, [
+        logger(.sdkQueuePersisted, [
             "size": String(batch.events.count),
             "attempt": String(batch.attempt + 1),
             "idempotency_key": batch.idempotencyKey,
@@ -240,7 +277,16 @@ public actor EventQueue {
 
         switch outcome.kind {
         case .success:
-            logger(.queueFlushOk, ["size": String(batch.events.count)])
+            // sdk.queue_persisted = "another successful batch landed".
+            // sdk.first_event_sent fires EXACTLY ONCE per process —
+            // it's the signal the dashboard onboarding checklist
+            // listens for. Subsequent flushes use the persisted
+            // signal so the checklist doesn't blink between states.
+            logger(.sdkQueuePersisted, ["size": String(batch.events.count)])
+            if !firstEventSentFired {
+                firstEventSentFired = true
+                logger(.sdkFirstEventSent, ["size": String(batch.events.count)])
+            }
             pendingBatch = nil
             storage.remove(pendingStorageKey)
             nextRetryAt = nil
@@ -258,7 +304,7 @@ public actor EventQueue {
                 code: "permanent_failure",
                 message: "Batch rejected permanently."
             )
-            logger(.queueFlushPermanentFailure, [
+            logger(.sdkFlushPermanentFailure, [
                 "code": err.code,
                 "status": outcome.envelope.map { String($0.statusCode) } ?? "n/a",
             ])
@@ -284,7 +330,7 @@ public actor EventQueue {
                 nextRetryAt = when
                 pendingBatch = batch
                 persistPending()
-                logger(.queueFlushRetry, [
+                logger(.sdkFlushRetryScheduled, [
                     "attempt": String(batch.attempt),
                     "delay_ms": String(delayMs),
                 ])
@@ -295,7 +341,7 @@ public actor EventQueue {
                     code: "retry_exhausted",
                     message: "Retry budget exhausted after \(batch.attempt) attempts."
                 )
-                logger(.queueFlushPermanentFailure, [
+                logger(.sdkFlushPermanentFailure, [
                     "code": err.code,
                     "reason": "retry_exhausted",
                 ])
@@ -356,13 +402,23 @@ public actor EventQueue {
     // MARK: - Helpers
 
     private func encodeBatch(_ events: [WireEvent]) -> Data {
-        let envelope: [String: Any] = [
+        // NorthStar §13.1 batch envelope. The backend validator
+        // matches on exactly these four top-level keys:
+        //   appId, environment, sdk: {name, version}, events
+        // Field naming is camelCase across the entire wire format,
+        // matching the Web/Node/RN SDKs and the backend ClickHouse
+        // schema. Drift here causes silent ingest rejection.
+        let body: [String: Any] = [
+            "appId": envelope.appId,
+            "environment": envelope.environment.rawValue,
+            "sdk": [
+                "name": SDK.name,
+                "version": SDK.version,
+            ],
             "events": events.map(eventToWire),
-            "sdk": SDK.name,
-            "sdk_version": SDK.version,
         ]
         do {
-            return try JSONSerialization.data(withJSONObject: envelope, options: [])
+            return try JSONSerialization.data(withJSONObject: body, options: [])
         } catch {
             // Defensive: should never happen since events were
             // validated. If it does, emit an empty batch so the
@@ -374,20 +430,34 @@ public actor EventQueue {
     private func eventToWire(_ event: WireEvent) -> [String: Any] {
         var properties: [String: Any] = [:]
         for (k, v) in event.properties { properties[k] = v.value }
+        // Canonical wire-event field names (matches Web/Node/RN +
+        // backend ClickHouse column names). Drift here causes
+        // ingest validation failures.
         var out: [String: Any] = [
-            "id": event.id,
-            "event": event.name,
-            "timestamp": ISO8601DateFormatter().string(from: event.timestamp),
-            "anonymous_id": event.anonymousId,
+            "eventId": event.id,
+            "name": event.name,
+            // Epoch milliseconds — matches Web/Node/RN's
+            // `timestamp: number` shape and the backend
+            // ClickHouse `timestamp_ms` column. ISO 8601 strings
+            // would fail the validator's `number` type check.
+            "timestamp": Int(event.timestamp.timeIntervalSince1970 * 1000),
+            "anonymousId": event.anonymousId,
             "properties": properties,
         ]
-        if let customerId = event.customerId {
-            out["customer_id"] = customerId
+        if let developerUserId = event.developerUserId {
+            out["developerUserId"] = developerUserId
+        }
+        if let crossdeckCustomerId = event.crossdeckCustomerId {
+            // Canonical Web/Node/RN axis — ship whenever known so
+            // server-side dedup hits the canonical record id.
+            out["crossdeckCustomerId"] = crossdeckCustomerId
         }
         return out
     }
 
+    /// Idempotency-Key prefix is the platform-wide `batch_…`
+    /// (matches Web/Node — same regex on the backend validator).
     private func makeIdempotencyKey() -> String {
-        return "cdbatch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        return "batch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
     }
 }

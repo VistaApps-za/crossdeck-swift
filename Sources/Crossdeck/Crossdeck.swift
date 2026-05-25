@@ -2,9 +2,21 @@
 //
 // The single thing a consumer touches:
 //
-//   let cd = Crossdeck.start(writeKey: "...", ...)
-//   cd.track("paywall_seen")
-//   try await cd.identify(customerId: "...", traits: [:])
+//   let cd = try Crossdeck.start(options: CrossdeckOptions(
+//       appId: "app_ios_xxx",
+//       publicKey: "cd_pub_live_…",
+//       environment: .production
+//   ))
+//   try cd.track("paywall_seen")
+//   try cd.identify(userId: "user_847", email: "wes@example.com")
+//
+// **Vocabulary contract — locked to Web/Node/RN.** Public identity
+// methods use `userId` for the consumer's auth-provider ID and
+// `email` as a first-class top-level option. NEVER `customerId` —
+// that name collides with `crossdeckCustomerId` (the cdcust_…
+// canonical handle) which is a different concept entirely.
+// Cross-platform teams reading the identify-users doc expect these
+// exact names; any drift fragments their users in production.
 //
 // All of the heavy lifting (queue, identity, entitlements, error
 // capture) hangs off this one type. The actor model below
@@ -33,28 +45,59 @@ import Foundation
 import UIKit
 #endif
 
-public struct CrossdeckOptions: Sendable {
-    /// `https://api.cross-deck.com/v1/events` for production. We
-    /// require it explicitly rather than defaulting so a misconfig
-    /// can never silently ship events to the wrong environment.
-    public var endpoint: URL
-    public var writeKey: String
+/// Environment declaration — must match the `publicKey` prefix.
+/// Mismatch is rejected at `Crossdeck.start(...)` so a typo'd key
+/// can't silently route production telemetry into sandbox
+/// dashboards.
+public enum Environment: String, Sendable, Codable {
+    case production
+    case sandbox
+}
 
-    /// Optional URLSession injection. Pass a mock in tests; pass
-    /// a custom session in production if you need proxy or App
+public struct CrossdeckOptions: Sendable {
+    /// Crossdeck App ID issued in the dashboard
+    /// (e.g. `app_ios_xxx`). Required. Goes on every batch envelope
+    /// so the backend can correlate events with the specific app
+    /// surface and reject mismatched env declarations (`env_mismatch`).
+    public var appId: String
+
+    /// Crossdeck publishable key (`cd_pub_live_…` / `cd_pub_test_…`).
+    /// Required. Safe to embed in a shipping `.ipa` — can only POST
+    /// events and read entitlements, never grant features or read
+    /// other customers' data.
+    public var publicKey: String
+
+    /// Explicit environment declaration. Required. Must match the
+    /// `publicKey` prefix — `cd_pub_live_…` ↔ `.production`,
+    /// `cd_pub_test_…` ↔ `.sandbox`. Mismatch is rejected at
+    /// `Crossdeck.start(...)`.
+    public var environment: Environment
+
+    /// Override the API base URL. Default `https://api.cross-deck.com/v1`.
+    /// Useful for self-hosted setups or the local emulator. When
+    /// overridden, the SDK's error-capture self-skip pivots off
+    /// THIS URL's hostname.
+    public var baseUrl: URL?
+
+    /// Optional URLSession injection. Pass a mock in tests; pass a
+    /// custom session in production if you need proxy or App
     /// Group transport.
     public var urlSession: URLSession?
 
     /// Storage backend. Defaults to `UserDefaultsStorage()`.
     public var storage: Storage?
 
-    /// Initial consent state. Default-deny (analytics off, errors
-    /// off) — consumer must opt in.
+    /// Initial consent state. Default-GRANT both channels — matches
+    /// Web/Node/RN platform contract. Consumers wire an opt-out via
+    /// `setConsent(...)` for strict-consent flows (cookie banner,
+    /// EU AGE-verification gate).
     public var initialConsent: ConsentState
 
-    /// Scrub PII before events leave the device. On by default
-    /// for the same reason consent defaults to off — we err on
-    /// the side of less data leaving the device.
+    /// Scrub PII before events leave the device. On by default —
+    /// emails and card numbers in property values are replaced with
+    /// `<email>` / `<card>` tokens before the event enters the queue.
+    /// Disable only when you have a hard requirement and explicit
+    /// consent to ship raw values.
     public var scrubPII: Bool
 
     /// Queue configuration (batch size, flush interval, retry).
@@ -83,8 +126,10 @@ public struct CrossdeckOptions: Sendable {
     public var debugLogger: DebugLogger
 
     public init(
-        endpoint: URL,
-        writeKey: String,
+        appId: String,
+        publicKey: String,
+        environment: Environment,
+        baseUrl: URL? = nil,
         urlSession: URLSession? = nil,
         storage: Storage? = nil,
         initialConsent: ConsentState = ConsentState(),
@@ -96,8 +141,10 @@ public struct CrossdeckOptions: Sendable {
         onPermanentFailure: PermanentFailureHandler? = nil,
         debugLogger: @escaping DebugLogger = noopDebugLogger
     ) {
-        self.endpoint = endpoint
-        self.writeKey = writeKey
+        self.appId = appId
+        self.publicKey = publicKey
+        self.environment = environment
+        self.baseUrl = baseUrl
         self.urlSession = urlSession
         self.storage = storage
         self.initialConsent = initialConsent
@@ -109,8 +156,33 @@ public struct CrossdeckOptions: Sendable {
         self.onPermanentFailure = onPermanentFailure
         self.debugLogger = debugLogger
     }
+
+    /// Effective base URL — `baseUrl` if set, else the production
+    /// default. Used by the HTTP client and the self-request skip.
+    public var effectiveBaseUrl: URL {
+        return baseUrl ?? URL(string: "https://api.cross-deck.com/v1")!
+    }
 }
 
+/// Crossdeck client — the single instance a consumer holds for the
+/// app's lifetime.
+///
+/// **Sendable conformance.** This class is `@unchecked Sendable`
+/// because:
+///
+///   * Every reference-type stored property is a `let` and resolves
+///     to a `Sendable` type (Swift actors, value-shape adapters
+///     marked Sendable, or @unchecked-Sendable boxes that document
+///     their own NSLock-based safety).
+///   * The single mutable property (`started: Bool`) is protected
+///     by `startedLock: NSLock` and only accessed via
+///     `assertStarted()` / `stop()`.
+///
+/// Adding a new `var` to this class without lock-protecting it
+/// would be a strict-concurrency violation the compiler will NOT
+/// catch (because of the unchecked attribute). Code review must
+/// enforce: any new mutable state goes inside an actor or behind
+/// the existing lock pattern.
 public final class Crossdeck: @unchecked Sendable {
     private let options: CrossdeckOptions
     private let storage: Storage
@@ -127,14 +199,59 @@ public final class Crossdeck: @unchecked Sendable {
     private var started: Bool = true
     private let startedLock = NSLock()
 
+    /// Runtime-mutable error capture context. Protected by
+    /// `errorStateLock`. The ErrorCapture pipeline reads through
+    /// these on every captured event so `setTag` / `setContext` /
+    /// `setErrorBeforeSend` take effect for the NEXT error after
+    /// the call, matching Web/Node/RN behaviour.
+    private let errorStateLock = NSLock()
+    private var errorTags: [String: String] = [:]
+    private var errorContext: [String: [String: String]] = [:]
+    private var runtimeBeforeSend: BeforeSendErrorHandler?
+
     /// Designated start path. Performs all synchronous init (file
     /// reads, UserDefaults reads, actor allocation) and returns
     /// the started client. Side-effects:
     ///
-    ///   * Reads / generates anonymousId
-    ///   * Rehydrates queue from disk (re-sends any pending batch)
-    ///   * Optionally installs the global exception handler
-    public static func start(options: CrossdeckOptions) -> Crossdeck {
+    ///   * Validates `publicKey` (must start with `cd_pub_`).
+    ///   * Validates `environment` against the key prefix
+    ///     (`cd_pub_live_…` → `.production`,
+    ///     `cd_pub_test_…` → `.sandbox`).
+    ///   * Reads / generates `anonymousId`.
+    ///   * Rehydrates queue from disk (re-sends any pending batch).
+    ///   * Optionally installs the global exception handler.
+    ///
+    /// Throws `CrossdeckError(code: "invalid_secret_key")` if the
+    /// publicKey shape is wrong, or `env_mismatch` if the
+    /// environment declaration doesn't match the key prefix.
+    public static func start(options: CrossdeckOptions) throws -> Crossdeck {
+        // Validate publicKey shape — must start with cd_pub_.
+        guard options.publicKey.hasPrefix("cd_pub_") else {
+            throw CrossdeckError(
+                type: .authentication,
+                code: "invalid_secret_key",
+                message: "Crossdeck.start requires a publishable key starting with cd_pub_. Got prefix: \(String(options.publicKey.prefix(8)))…"
+            )
+        }
+        // Validate env matches key prefix — same check Web/Node/RN
+        // make to prevent a typo'd build configuration silently
+        // routing production telemetry to sandbox dashboards.
+        let expectedEnv: Environment = options.publicKey.hasPrefix("cd_pub_live_") ? .production : .sandbox
+        guard options.environment == expectedEnv else {
+            throw CrossdeckError(
+                type: .invalidRequest,
+                code: "env_mismatch",
+                message: "publicKey prefix declares \(expectedEnv.rawValue) but options.environment is \(options.environment.rawValue). Fix one or the other before start."
+            )
+        }
+        // App ID required and non-empty.
+        guard !options.appId.isEmpty else {
+            throw CrossdeckError(
+                type: .invalidRequest,
+                code: "missing_app_id",
+                message: "Crossdeck.start requires a non-empty appId. Find yours in the Crossdeck dashboard."
+            )
+        }
         return Crossdeck(options: options)
     }
 
@@ -147,22 +264,36 @@ public final class Crossdeck: @unchecked Sendable {
         self.entitlements = EntitlementCache(storage: storage)
         self.consent = ConsentManager(initial: options.initialConsent, scrubPII: options.scrubPII)
         self.breadcrumbs = Breadcrumbs(capacity: options.breadcrumbCapacity)
+        // Events endpoint = baseUrl + "/events". The /events path is
+        // appended here so the consumer only has to think in terms
+        // of base URLs (matches the Web/Node/RN convention).
+        let eventsEndpoint = options.effectiveBaseUrl.appendingPathComponent("events")
         self.http = HTTPClient(
-            endpoint: options.endpoint,
-            writeKey: options.writeKey,
+            endpoint: eventsEndpoint,
+            publicKey: options.publicKey,
             session: options.urlSession
         )
+        // Pass the envelope context (appId, environment, sdk) into
+        // the queue so encodeBatch can build the canonical envelope
+        // every Web/Node SDK already ships.
         self.queue = EventQueue(
             http: http,
             storage: storage,
+            envelope: EventQueueEnvelope(
+                appId: options.appId,
+                environment: options.environment
+            ),
             logger: options.debugLogger,
             onPermanentFailure: options.onPermanentFailure,
             config: options.queueConfig
         )
         self.device = DeviceInfo.capture()
-        self.selfHostname = extractSelfHostname(from: options.endpoint.absoluteString)
+        // Self-skip pivots on the configured base URL's host, NOT
+        // the production default — so a staging or self-hosted
+        // relay never recurses through its own fetch-wrap.
+        self.selfHostname = extractSelfHostname(from: options.effectiveBaseUrl.absoluteString)
 
-        options.debugLogger(.sdkStart, [
+        options.debugLogger(.sdkConfigured, [
             "platform": device.platform,
             "sdk_version": SDK.version,
         ])
@@ -177,6 +308,14 @@ public final class Crossdeck: @unchecked Sendable {
         // the prior session. Fire-and-forget — if there's nothing
         // to send, this is a no-op.
         Task { await queue.flush() }
+
+        // Boot heartbeat. POSTs /sdk/heartbeat so the dashboard's
+        // onboarding checklist flips LIVE within ~200ms — same shape
+        // and timing as Web/Node/RN. Fire-and-forget; failure is
+        // surfaced via the debug logger. Skipped automatically when
+        // `captureUncaughtExceptions: false` AND we're in a test
+        // build via the urlSession injection (URLProtocol stub).
+        Task { _ = await self.heartbeat() }
     }
 
     // MARK: - Public API
@@ -190,38 +329,73 @@ public final class Crossdeck: @unchecked Sendable {
                 message: "track(name) requires a non-empty name."
             )
         }
-        if let properties { try validateEventProperties(properties) }
-
-        // Convert to AnyCodable synchronously on the caller's
-        // thread, before spawning the Task. This achieves two
-        // things: (a) the closure only captures Sendable values
-        // (AnyCodable is @unchecked Sendable for the same reason
-        // documented at the type), avoiding strict-concurrency
-        // data-race diagnostics; (b) the conversion + validation
-        // both happen synchronously so caller-side errors surface
-        // immediately rather than swallowed inside a Task.
-        var codedProperties: [String: AnyCodable] = [:]
+        // Sanitise + warn (NEVER throws — matches Web/Node/RN
+        // bank-grade contract that track() never fails on a single
+        // bad property). The cleaned bag ships on the wire; warnings
+        // surface via the debug logger for visibility.
+        let sanitisedProperties: [String: Any]
         if let properties {
-            for (k, v) in properties { codedProperties[k] = AnyCodable(v) }
+            let result = validateEventProperties(properties)
+            sanitisedProperties = result.properties
+            for warning in result.warnings {
+                options.debugLogger(.sdkPropertyCoerced, [
+                    "key": warning.key,
+                    "kind": warning.kind.rawValue,
+                ])
+            }
+        } else {
+            sanitisedProperties = [:]
         }
+
+        // SNAPSHOT all SDK state synchronously on the caller's thread
+        // BEFORE the Task. This eliminates the classic identify+track
+        // race where the Task would read identity AFTER a concurrent
+        // identify Task updated it — meaning a track call following
+        // identify could observe either the pre- or post-identify
+        // developerUserId depending on scheduler luck. With sync
+        // snapshot, the developerUserId baked into the wire event is
+        // exactly what was visible at the moment track() returned to
+        // the caller.
+        let consentSnapshot = consent.snapshotSync()
+        guard consentSnapshot.consent.analytics else {
+            options.debugLogger(.sdkConsentDenied, ["event": name])
+            return
+        }
+
+        // Warn (don't block) on property names that look like PII or
+        // secrets — `email`, `password`, `token`, `secret`, `card`,
+        // `phone`, or any name containing `password` / `credit_card`.
+        // Same patterns as Web/Node/RN — cross-platform teams get
+        // identical warnings.
+        let sensitiveHits = findSensitivePropertyKeys(properties)
+        if !sensitiveHits.isEmpty {
+            options.debugLogger(.sdkSensitivePropertyWarning, [
+                "event": name,
+                "keys": sensitiveHits.joined(separator: ","),
+            ])
+        }
+        let scrub = consentSnapshot.scrub
+        let identitySnapshot = identity.snapshotSync()
+        let superPropsSnapshot = superProperties.snapshotSync()
+
+        // Convert caller-supplied properties to Sendable AnyCodable
+        // immediately so the Task closure captures only Sendable
+        // values (and so a caller mutating the dict after track()
+        // returns can't poison the queued event).
+        // Convert the SANITISED properties (post-coercion) to
+        // Sendable AnyCodable for the Task closure. The original
+        // caller-passed bag is discarded — the sanitiser already
+        // returned a cleaned copy with non-encodable values
+        // dropped / coerced.
+        var codedProperties: [String: AnyCodable] = [:]
+        for (k, v) in sanitisedProperties { codedProperties[k] = AnyCodable(v) }
         let codedSnapshot = codedProperties
+        let devicePayload = device.asPayload
 
         Task {
-            let consentState = await consent.state
-            // Analytics consent gate — errors come through a
-            // separate path so they ignore this.
-            guard consentState.analytics else {
-                options.debugLogger(.consentDenied, ["event": name])
-                return
-            }
-            let scrub = await consent.scrubPII
-
-            let (anonymousId, customerId) = await identity.snapshot()
-            let superProps = await superProperties.snapshot()
-
             var merged: [String: Any] = [:]
-            for (k, v) in superProps { merged[k] = v }
-            for (k, v) in device.asPayload { merged[k] = v }
+            for (k, v) in superPropsSnapshot { merged[k] = v }
+            for (k, v) in devicePayload { merged[k] = v }
             for (k, v) in codedSnapshot { merged[k] = v.value }
 
             let final = scrub ? (scrubPIIDeep(merged) as? [String: Any]) ?? merged : merged
@@ -229,12 +403,13 @@ public final class Crossdeck: @unchecked Sendable {
             for (k, v) in final { coded[k] = AnyCodable(v) }
 
             let event = WireEvent(
-                id: "cdevt_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""),
+                id: "evt_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""),
                 name: name,
                 timestamp: Date(),
                 properties: coded,
-                anonymousId: anonymousId,
-                customerId: customerId
+                anonymousId: identitySnapshot.anonymousId,
+                developerUserId: identitySnapshot.developerUserId,
+                crossdeckCustomerId: identitySnapshot.crossdeckCustomerId
             )
 
             await queue.enqueue(event)
@@ -246,41 +421,433 @@ public final class Crossdeck: @unchecked Sendable {
         }
     }
 
-    public func identify(customerId: String, traits: [String: Any]? = nil) throws {
+    /// Link the device to a stable user identity.
+    ///
+    /// **Vocabulary contract (matches Web/Node/RN exactly):**
+    /// - `userId` — your auth provider's stable user identifier
+    ///   (Firebase Auth's `uid`, Auth0's `sub`, Supabase's `id`,
+    ///   etc.). NEVER pass a `cdcust_…` here — that's a separate
+    ///   server-side handle.
+    /// - `email` — first-class, top-level. The platform-wide
+    ///   universal anchor for identity-merge: passing email here
+    ///   lets the backend coalesce the same person across devices
+    ///   even if their `userId` changes (rare but happens after
+    ///   auth-provider migrations).
+    /// - `traits` — arbitrary profile data, sanitised at the SDK
+    ///   boundary. Examples: `name`, `plan`, `signedUpAt`. Never
+    ///   put PII like email here — use the dedicated parameter.
+    ///
+    /// **Side effects.**
+    /// - The entitlement cache is unconditionally cleared so a
+    ///   freshly-identified user never observes the prior user's
+    ///   entitlements through any sync read path.
+    /// - An `$identify` event is queued carrying the email + traits
+    ///   if either is supplied, so the same downstream consumers
+    ///   that handle `track` events also see the identify.
+    ///
+    /// Throws `CrossdeckError` if `userId` is empty or if any
+    /// trait value isn't JSON-encodable.
+    public func identify(
+        userId: String,
+        email: String? = nil,
+        traits: [String: Any]? = nil
+    ) throws {
         try assertStarted()
-        guard !customerId.isEmpty else {
+        guard !userId.isEmpty else {
             throw CrossdeckError(
                 type: .invalidRequest,
-                code: "missing_customer_id",
-                message: "identify(customerId) requires a non-empty id."
+                code: "missing_user_id",
+                message: "identify(userId:) requires a non-empty userId."
             )
         }
-        if let traits { try validateEventProperties(traits) }
-
-        Task {
-            // If the customerId is changing, clear the prior
-            // entitlement cache so we don't leak a previous user's
-            // entitlements to a freshly identified one. Unconditional
-            // clear is correct: identify with the same id is rare and
-            // a stray clear is cheaper than a leaked entitlement.
-            let priorId = await identity.snapshot().customerId
-            let didChange = await identity.setCustomerId(customerId)
-            if didChange || priorId == nil {
-                await entitlements.clear()
+        // Sanitise traits — non-encodable / oversize / cyclic values
+        // are coerced or dropped (matches Web/Node/RN). Never throws.
+        let cleanedTraits: [String: Any]
+        if let traits {
+            let result = validateEventProperties(traits)
+            cleanedTraits = result.properties
+            for warning in result.warnings {
+                options.debugLogger(.sdkPropertyCoerced, [
+                    "scope": "identify.traits",
+                    "key": warning.key,
+                    "kind": warning.kind.rawValue,
+                ])
             }
-            options.debugLogger(.identityIdentify, ["customer_id": customerId])
-            await breadcrumbs.add(Breadcrumb(
+        } else {
+            cleanedTraits = [:]
+        }
+
+        // SYNC mutations: set the developerUserId AND wipe the
+        // entitlement cache before this method returns. Two reasons:
+        //
+        //   1) A subsequent track() (or the `$identify` event below)
+        //      MUST observe the new developerUserId — async ordering
+        //      between two Tasks would leave the visible identity
+        //      undefined for a moment.
+        //   2) Unconditional cache clear is part of the bank-grade
+        //      contract documented for KPMG audit: a freshly
+        //      identified user MUST NOT briefly observe the prior
+        //      user's entitlements through any sync read path.
+        //      Even identifying with the same id wipes the cache —
+        //      a tiny redundant rebuild is cheaper than a leak.
+        identity.setDeveloperUserIdSync(userId)
+        entitlements.clearSync()
+        options.debugLogger(.sdkConfigured, ["user_id": userId])
+
+        // Breadcrumb add is async (Breadcrumbs is an actor); fire
+        // and forget — this is observability, not on the data-
+        // integrity path.
+        let breadcrumbsRef = breadcrumbs
+        Task {
+            await breadcrumbsRef.add(Breadcrumb(
                 category: .identity,
                 level: .info,
-                message: "identify \(customerId)"
+                message: "identify \(userId)"
             ))
         }
 
-        if let traits {
-            // Fire an `$identify` event so traits land in the same
-            // pipeline as track events.
-            try track("$identify", properties: traits)
+        // Fire the server-side alias call in the background. Matches
+        // Web/Node/RN: POSTs /identity/alias with userId + anonymousId
+        // + email + traits; on success persists the returned cdcust_;
+        // on failure surfaces a warning to the debug logger without
+        // throwing (local identity is already correct via the sync
+        // setter above — server-side merge is best-effort).
+        let snapshot = identity.snapshotSync()
+        let appIdValue = options.appId
+        let envValue = options.environment.rawValue
+        // Traits to wire format: stringify every value (the wire
+        // shape is Dictionary<String, String>; complex types get
+        // String(describing:) — a degenerate trait that's not a
+        // string round-trips as its description rather than
+        // crashing the JSON encoder).
+        let wireTraits: [String: String] = cleanedTraits.reduce(into: [String: String]()) { acc, kv in
+            if let s = kv.value as? String {
+                acc[kv.key] = s
+            } else {
+                acc[kv.key] = String(describing: kv.value)
+            }
         }
+        let httpRef = http
+        let identityRef = identity
+        let debug = options.debugLogger
+        Task {
+            do {
+                let result = try await Crossdeck.postAliasIdentity(
+                    http: httpRef,
+                    body: AliasIdentityRequest(
+                        userId: userId,
+                        anonymousId: snapshot.anonymousId,
+                        email: email,
+                        traits: wireTraits
+                    )
+                )
+                // Persist the canonical cdcust_ so subsequent events
+                // ship it on the wire and a sign-out / sign-in cycle
+                // can short-circuit a redundant alias call.
+                identityRef.setCrossdeckCustomerIdSync(result.crossdeckCustomerId)
+                debug(.sdkConfigured, [
+                    "alias": "ok",
+                    "cdcust": result.crossdeckCustomerId,
+                    "merge_pending": String(result.mergePending),
+                ])
+            } catch {
+                // Best-effort. Local identity is already set; server
+                // merge will catch up on the next identify or on a
+                // backend reconciliation pass.
+                debug(.sdkInvalidKey, [
+                    "alias": "failed",
+                    "error": String(describing: error),
+                ])
+            }
+        }
+    }
+
+    /// Manually trigger a `/identity/alias` round-trip and await the
+    /// canonical cdcust_ result. The synchronous `identify(userId:)`
+    /// already fires this in the background — only use the async
+    /// variant when you need to know the cdcust_ before continuing
+    /// (e.g. server-side cross-reference at sign-in).
+    public func identifyAndWait(
+        userId: String,
+        email: String? = nil,
+        traits: [String: Any]? = nil
+    ) async throws -> AliasResult {
+        try identify(userId: userId, email: email, traits: traits)
+        let snapshot = identity.snapshotSync()
+        // Re-sanitise traits for this call's wire body — the prior
+        // identify() did the same on its own background Task; doing
+        // it here keeps the wireTraits in sync with whatever Web/RN
+        // would ship.
+        let cleanedTraitsForWait: [String: Any] = traits.map { validateEventProperties($0).properties } ?? [:]
+        let wireTraits: [String: String] = cleanedTraitsForWait.reduce(into: [String: String]()) { acc, kv in
+            if let s = kv.value as? String { acc[kv.key] = s } else { acc[kv.key] = String(describing: kv.value) }
+        }
+        let result = try await Crossdeck.postAliasIdentity(
+            http: http,
+            body: AliasIdentityRequest(
+                userId: userId,
+                anonymousId: snapshot.anonymousId,
+                email: email,
+                traits: wireTraits
+            )
+        )
+        identity.setCrossdeckCustomerIdSync(result.crossdeckCustomerId)
+        return result
+    }
+
+    /// GDPR right-to-be-forgotten — POSTs `/identity/forget` and
+    /// then ALWAYS runs the local cleanup, even on server error.
+    ///
+    /// Why local wipe runs regardless of server outcome: the
+    /// publishable-key `forget` flow may return 401 from the
+    /// backend if the call is identified (cd_pub_ + identified
+    /// erasure requires `idToken`, which v1.0.1 doesn't yet
+    /// support). Matches Web SDK behaviour (sdks/web/src/crossdeck.ts:809)
+    /// — local state wipes anyway so the consumer's GDPR contract
+    /// holds even when the server-side erasure needs a follow-up
+    /// from their own backend with the secret key.
+    ///
+    /// Throws on outright network failure so the caller can show
+    /// "couldn't reach Crossdeck — try again" UI; local wipe still
+    /// completes in the throw path.
+    public func forget() async throws {
+        try assertStarted()
+        let snap = identity.snapshotSync()
+        let body = ForgetIdentityRequest(
+            userId: snap.developerUserId,
+            anonymousId: snap.anonymousId,
+            customerId: snap.crossdeckCustomerId
+        )
+        let bodyData = try JSONEncoder().encode(body)
+        let outcome = await http.request(
+            method: "POST",
+            path: "/identity/forget",
+            body: bodyData,
+            idempotencyKey: "batch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        )
+
+        // Local wipe FIRST — runs regardless of server outcome so a
+        // server-side 401 (publishable-key identified erasure
+        // restriction) doesn't leave stale identity on the device.
+        await identity.reset()
+        await entitlements.clear()
+        await superProperties.clear()
+        await breadcrumbs.clear()
+
+        // If the server actually rejected the request, surface that
+        // to the caller — but local state is already clean. The
+        // consumer can retry later (e.g. from their backend with a
+        // secret key) without worrying about double-erasing locally.
+        if outcome.kind != .success {
+            // 401 from publishable-key identified erasure is the
+            // documented carve-out — log it but don't throw.
+            if outcome.envelope?.statusCode == 401 {
+                options.debugLogger(.sdkInvalidKey, [
+                    "endpoint": "/identity/forget",
+                    "hint": "Server requires idToken for identified erasure with cd_pub_; local state is wiped, retry server-side with cd_sk_.",
+                ])
+                return
+            }
+            throw outcome.error ?? CrossdeckError(
+                type: .apiError,
+                code: "forget_failed",
+                message: "/identity/forget did not succeed. Local state already wiped — server retry needed."
+            )
+        }
+    }
+
+    /// Forward purchase evidence to the backend for verification +
+    /// entitlement projection. iOS apps wire this from StoreKit 2
+    /// transaction callbacks; the backend validates the JWS
+    /// signature, projects the entitlement set, and returns it so
+    /// the local cache warms immediately.
+    public func syncPurchases(
+        rail: AuditRail,
+        signedTransactionInfo: String? = nil,
+        signedRenewalInfo: String? = nil,
+        appAccountToken: String? = nil
+    ) async throws -> PurchaseResult {
+        try assertStarted()
+        // v1.0.1: rail must be `.apple`. Backend rejects rail=google
+        // explicitly with `google_not_supported` (backend/src/api/
+        // v1-purchases-validation.ts:27). Google Play wiring ships
+        // in v1.1 alongside the React Native + Android Play Billing
+        // surface. Catch early so the consumer sees a clear error.
+        guard rail == .apple else {
+            throw CrossdeckError(
+                type: .invalidRequest,
+                code: "rail_not_supported",
+                message: "syncPurchases v1.0.1 supports rail=apple only. Google Play support ships in v1.1."
+            )
+        }
+        // Snapshot identity for the post-sync cache warm — we
+        // dropped the wire-body identity hints (server derives them
+        // from the JWS), but we still need the developerUserId
+        // locally to key the entitlement cache.
+        let snap = identity.snapshotSync()
+        let body = PurchaseSyncRequest(
+            rail: rail.rawValue,
+            signedTransactionInfo: signedTransactionInfo,
+            signedRenewalInfo: signedRenewalInfo,
+            appAccountToken: appAccountToken
+        )
+        let bodyData = try JSONEncoder().encode(body)
+        let outcome = await http.request(
+            method: "POST",
+            path: "/purchases/sync",
+            body: bodyData,
+            idempotencyKey: "batch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        )
+        guard outcome.kind == .success,
+              let data = outcome.envelope?.body else {
+            throw outcome.error ?? CrossdeckError(
+                type: .apiError,
+                code: "sync_purchases_failed",
+                message: "/purchases/sync did not succeed."
+            )
+        }
+        let result = try JSONDecoder().decode(PurchaseResult.self, from: data)
+        // Warm the cache with the projected entitlement set.
+        identity.setCrossdeckCustomerIdSync(result.crossdeckCustomerId)
+        if let userId = snap.developerUserId {
+            await entitlements.write(EntitlementSnapshot(
+                developerUserId: userId,
+                entitlements: result.entitlements
+            ))
+        }
+        return result
+    }
+
+    /// Fetch the current entitlement set from the server and hydrate
+    /// the local cache. Returns the freshly-fetched set so the
+    /// caller can render UI immediately without re-reading from
+    /// `entitlementsForCurrentCustomer()`.
+    ///
+    /// On a 5xx / network failure, the cache is preserved
+    /// (last-known-good wins) and the failure is recorded via
+    /// `markRefreshFailed` so `freshness()` surfaces it to UI.
+    @discardableResult
+    public func getEntitlements() async throws -> [PublicEntitlement] {
+        try assertStarted()
+        let snap = identity.snapshotSync()
+        guard let userId = snap.developerUserId else {
+            throw CrossdeckError(
+                type: .invalidRequest,
+                code: "no_identity",
+                message: "getEntitlements requires identify(userId:) to have been called first."
+            )
+        }
+        // Backend requires one of customerId / userId / anonymousId
+        // (backend/src/api/v1-entitlements.ts:92). Send every axis
+        // we know — server picks the most specific.
+        var query: [String: String] = ["userId": userId]
+        if let cdcust = snap.crossdeckCustomerId { query["customerId"] = cdcust }
+        query["anonymousId"] = snap.anonymousId
+        let outcome = await http.request(method: "GET", path: "/entitlements", query: query)
+        guard outcome.kind == .success, let data = outcome.envelope?.body else {
+            // Bank-grade: don't fail the cache down to free. Mark
+            // the refresh as failed; UI can show a "checking…" badge
+            // but a paying customer keeps their entitlement.
+            await entitlements.markRefreshFailed()
+            throw outcome.error ?? CrossdeckError(
+                type: .apiError,
+                code: "get_entitlements_failed",
+                message: "/entitlements did not succeed."
+            )
+        }
+        let response = try JSONDecoder().decode(EntitlementsListResponse.self, from: data)
+        identity.setCrossdeckCustomerIdSync(response.crossdeckCustomerId)
+        await entitlements.write(EntitlementSnapshot(
+            developerUserId: userId,
+            entitlements: response.data
+        ))
+        return response.data
+    }
+
+    /// Subscribe to entitlement-cache mutations. Returns a token;
+    /// retain it in your view model and pass back to
+    /// `unsubscribeFromEntitlements(_:)` to detach.
+    @discardableResult
+    public func onEntitlementsChange(
+        _ handler: @escaping EntitlementSubscriber
+    ) async -> UUID {
+        return await entitlements.subscribe(handler)
+    }
+
+    public func unsubscribeFromEntitlements(_ token: UUID) async {
+        await entitlements.unsubscribe(token)
+    }
+
+    /// Boot heartbeat. POSTs `/sdk/heartbeat` to flip the dashboard
+    /// onboarding checklist to LIVE within ~200ms and to capture
+    /// server-time for clock-skew detection. Fires automatically on
+    /// `start(...)` unless `autoHeartbeat: false`.
+    @discardableResult
+    public func heartbeat() async -> HeartbeatResponse? {
+        // GET — matches the backend route (backend/src/api/v1.ts:252).
+        // The handler reads appId + environment from the API key
+        // (resolveAppKey), NOT the request body. Body would be
+        // silently dropped + previously the SDK was POSTing → 404.
+        // The Crossdeck-Sdk-Version header (set in HTTPClient) is
+        // what populates the per-SDK dashboard surface tile.
+        let outcome = await http.request(
+            method: "GET",
+            path: "/sdk/heartbeat"
+        )
+        guard outcome.kind == .success, let data = outcome.envelope?.body else { return nil }
+        return try? JSONDecoder().decode(HeartbeatResponse.self, from: data)
+    }
+
+    /// Internal helper for the alias POST. Throws on any non-success
+    /// outcome; decodes the AliasResult body on success.
+    private static func postAliasIdentity(
+        http: HTTPClient,
+        body: AliasIdentityRequest
+    ) async throws -> AliasResult {
+        let bodyData = try JSONEncoder().encode(body)
+        let outcome = await http.request(
+            method: "POST",
+            path: "/identity/alias",
+            body: bodyData,
+            idempotencyKey: "batch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        )
+        guard outcome.kind == .success, let data = outcome.envelope?.body else {
+            throw outcome.error ?? CrossdeckError(
+                type: .apiError,
+                code: "alias_failed",
+                message: "/identity/alias did not succeed."
+            )
+        }
+        return try JSONDecoder().decode(AliasResult.self, from: data)
+    }
+
+    /// Synchronous check — returns true iff the entitlement key is
+    /// in the cached set for the currently identified user. Safe
+    /// to call from any thread, including SwiftUI view bodies and
+    /// UIKit tap handlers. Never blocks on network.
+    ///
+    /// Returns false if no user is identified, or if the cache has
+    /// nothing for the current user (treat as "not yet known" —
+    /// fall back to a refresh + paywall if needed).
+    public func isEntitled(_ key: String) -> Bool {
+        guard let userId = identity.snapshotSync().developerUserId else { return false }
+        return entitlements.isEntitledSync(key, for: userId)
+    }
+
+    /// Synchronous read of the full entitlement set for the current
+    /// user. Returns nil if no user is identified or the cache is
+    /// cold for them. Filters out expired entitlements (validUntil
+    /// in the past).
+    public func entitlementsForCurrentCustomer() -> [PublicEntitlement]? {
+        guard let userId = identity.snapshotSync().developerUserId else { return nil }
+        return entitlements.entitlementsSync(for: userId)
+    }
+
+    /// Same as `entitlementsForCurrentCustomer` but returns just the
+    /// active entitlement keys — convenient for paywall UIs that
+    /// only need to render the set of unlocked features.
+    public func activeEntitlementKeys() -> [String]? {
+        return entitlementsForCurrentCustomer()?.map { $0.key }
     }
 
     public func reset() throws {
@@ -290,7 +857,7 @@ public final class Crossdeck: @unchecked Sendable {
             await entitlements.clear()
             await superProperties.clear()
             await breadcrumbs.clear()
-            options.debugLogger(.identityReset, [:])
+            options.debugLogger(.sdkConfigured, [:])
         }
     }
 
@@ -314,10 +881,92 @@ public final class Crossdeck: @unchecked Sendable {
         ErrorCapture.shared.captureError(error, handled: handled)
     }
 
+    /// Capture a handled message (no underlying Error). Used for
+    /// "this shouldn't have happened" log lines you want to land in
+    /// the dashboard. Goes through the same pipeline as
+    /// `captureError`, but with no stack and no `Error` type.
+    /// Mirrors Web/Node/RN.
+    public func captureMessage(_ message: String, level: BreadcrumbLevel = .info) {
+        let synthetic = CrossdeckError(
+            type: .unknown,
+            code: "captured_message",
+            message: message
+        )
+        ErrorCapture.shared.captureError(synthetic, handled: true)
+        // Also drop a breadcrumb so a subsequent error has the
+        // captured message in its context window.
+        let crumbsRef = breadcrumbs
+        Task {
+            await crumbsRef.add(Breadcrumb(
+                category: .custom,
+                level: level,
+                message: message
+            ))
+        }
+    }
+
+    /// Set a single tag — key/value pair attached to every
+    /// subsequent error event until cleared or overwritten. Tags
+    /// are first-class Sentry-style search facets (`tag:plan=pro`
+    /// in the dashboard). Persisted in-memory for the lifetime of
+    /// the Crossdeck instance.
+    public func setTag(_ key: String, _ value: String) {
+        guard !key.isEmpty else { return }
+        errorStateLock.lock()
+        defer { errorStateLock.unlock() }
+        errorTags[key] = value
+    }
+
+    /// Bulk tag setter — replaces the entire tag map atomically.
+    /// Pass `[:]` to clear all tags.
+    public func setTags(_ tags: [String: String]) {
+        errorStateLock.lock()
+        defer { errorStateLock.unlock() }
+        errorTags = tags
+    }
+
+    /// Set a context block (Sentry-style). Each block is a named
+    /// dictionary attached to error events — e.g.
+    /// `setContext("device", ["build": "2.3.1", "store": "appstore"])`.
+    /// Pass `[:]` to clear a block.
+    public func setContext(_ name: String, _ data: [String: String]) {
+        guard !name.isEmpty else { return }
+        errorStateLock.lock()
+        defer { errorStateLock.unlock() }
+        if data.isEmpty {
+            errorContext.removeValue(forKey: name)
+        } else {
+            errorContext[name] = data
+        }
+    }
+
+    /// Replace the `beforeSendError` hook at runtime. The hook
+    /// installed via `CrossdeckOptions.beforeSendError` is the
+    /// initial value; this method lets a consumer rotate it after
+    /// `start(...)` (e.g. install a stricter filter once consent
+    /// changes). Pass `nil` to remove the hook.
+    public func setErrorBeforeSend(_ handler: BeforeSendErrorHandler?) {
+        errorStateLock.lock()
+        defer { errorStateLock.unlock() }
+        runtimeBeforeSend = handler
+    }
+
+    /// Internal snapshot of runtime error state — used by the
+    /// ErrorCapture install closure when building a wire event.
+    func snapshotErrorState() -> (
+        tags: [String: String],
+        context: [String: [String: String]],
+        beforeSend: BeforeSendErrorHandler?
+    ) {
+        errorStateLock.lock()
+        defer { errorStateLock.unlock() }
+        return (errorTags, errorContext, runtimeBeforeSend)
+    }
+
     public func setConsent(_ state: ConsentState) {
         Task {
             await consent.update(state)
-            options.debugLogger(.consentChange, [
+            options.debugLogger(.sdkConsentChanged, [
                 "analytics": String(state.analytics),
                 "errors": String(state.errors),
             ])
@@ -346,7 +995,7 @@ public final class Crossdeck: @unchecked Sendable {
         guard started else {
             throw CrossdeckError(
                 type: .invalidRequest,
-                code: "not_started",
+                code: "not_initialized",
                 message: "Crossdeck client was stopped — call Crossdeck.start(...) again."
             )
         }
@@ -356,7 +1005,7 @@ public final class Crossdeck: @unchecked Sendable {
         startedLock.lock()
         defer { startedLock.unlock() }
         started = false
-        options.debugLogger(.sdkStop, [:])
+        options.debugLogger(.sdkConfigured, [:])
         // Best-effort: persist anything in flight before relinquishing.
         Task { await queue.persistAll() }
     }
@@ -364,43 +1013,137 @@ public final class Crossdeck: @unchecked Sendable {
     private func installErrorCapture() {
         let breadcrumbsRef = breadcrumbs
         let queueRef = queue
-        let optsBeforeSend = options.beforeSendError
+        let identityRef = identity
+        let consentRef = consent
+        let debugLogger = options.debugLogger
+        // Seed the runtime beforeSend with the option-provided hook
+        // so a consumer's CrossdeckOptions.beforeSendError is the
+        // initial value of the runtime-replaceable hook. Subsequent
+        // setErrorBeforeSend(...) calls replace it; the capture
+        // closure reads through errorStateRef() each event so the
+        // replacement takes effect for the NEXT error.
+        if let initialBeforeSend = options.beforeSendError {
+            setErrorBeforeSend(initialBeforeSend)
+        }
+        // Sendable @escaping read-through into the runtime error
+        // state (tags, context, beforeSend). Captured by reference
+        // so post-install setTag / setContext / setErrorBeforeSend
+        // calls take effect for the NEXT error.
+        let errorStateRef: @Sendable () -> (
+            tags: [String: String],
+            context: [String: [String: String]],
+            beforeSend: BeforeSendErrorHandler?
+        ) = { [weak self] in
+            self?.snapshotErrorState() ?? ([:], [:], nil)
+        }
+
         ErrorCapture.shared.install(
-            beforeSend: optsBeforeSend,
+            beforeSend: nil, // runtime hook applied inside capture closure
+
             breadcrumbs: { await breadcrumbsRef.snapshot() },
-            capture: { [weak self] event in
-                guard let self else { return }
-                // Wrap the CapturedError as a WireEvent so it travels
-                // the same queue, gets the same idempotency guarantees,
-                // and lands in the same backend pipeline as track().
-                let (anon, cust) = (
-                    "<error-capture>",  // identity read is async — error path skips it to ship sub-second
-                    nil as String?
-                )
-                _ = (anon, cust)
-                Task {
-                    let (anonymousId, customerId) = await self.identity.snapshot()
-                    var props: [String: AnyCodable] = [
-                        "error.type": AnyCodable(event.type),
-                        "error.message": AnyCodable(event.message),
-                        "error.fingerprint": AnyCodable(event.fingerprint),
-                        "error.handled": AnyCodable(event.handled),
-                    ]
-                    if !event.stack.isEmpty {
-                        props["error.stack"] = AnyCodable(event.stack.map {
-                            "\($0.module):\($0.symbol)"
-                        })
-                    }
-                    let wire = WireEvent(
-                        id: "cderr_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""),
-                        name: "$error",
-                        timestamp: event.timestamp,
-                        properties: props,
-                        anonymousId: anonymousId,
-                        customerId: customerId
-                    )
-                    await queueRef.enqueue(wire)
+            selfHostname: selfHostname,
+            capture: { event in
+                // Errors-consent gate. Sync read from the consent
+                // box so we don't pay an actor hop per error. If
+                // consent.errors is false, drop the event silently
+                // (consumers who want crash reports regardless
+                // should leave consent.errors true even when
+                // analytics is off — they're independent toggles).
+                let consentSnapshot = consentRef.snapshotSync()
+                guard consentSnapshot.consent.errors else {
+                    debugLogger(.sdkConsentDenied, [
+                        "channel": "errors",
+                        "type": event.type,
+                    ])
+                    return
                 }
+
+                // Identity snapshot is sync — the error path
+                // must ship sub-second under crash conditions,
+                // never block on an actor hop.
+                let identitySnapshot = identityRef.snapshotSync()
+
+                // Build the wire payload. EVERY string field that
+                // could carry user data (message, stack symbols,
+                // breadcrumb messages + data) is run through the
+                // PII scrubber when scrub is enabled.
+                let scrub = consentSnapshot.scrub
+                let scrubbedMessage = scrub ? scrubPII(event.message) : event.message
+                let stackStrings: [String] = event.stack.map {
+                    let raw = "\($0.module):\($0.symbol)"
+                    return scrub ? scrubPII(raw) : raw
+                }
+
+                var props: [String: AnyCodable] = [
+                    "error.type": AnyCodable(event.type),
+                    "error.message": AnyCodable(scrubbedMessage),
+                    "error.fingerprint": AnyCodable(event.fingerprint),
+                    "error.handled": AnyCodable(event.handled),
+                    "error.timestamp_ms": AnyCodable(Int(event.timestamp.timeIntervalSince1970 * 1000)),
+                ]
+
+                // Runtime tags + context (from setTag / setContext)
+                // attach to every error event. Mirrors Web/Node/RN
+                // — the dashboard surfaces these as search facets.
+                let errorState = errorStateRef()
+                if !errorState.tags.isEmpty {
+                    props["error.tags"] = AnyCodable(errorState.tags)
+                }
+                if !errorState.context.isEmpty {
+                    props["error.context"] = AnyCodable(errorState.context)
+                }
+                if !stackStrings.isEmpty {
+                    props["error.stack"] = AnyCodable(stackStrings)
+                }
+                if !event.breadcrumbs.isEmpty {
+                    // Breadcrumbs ship as an array of [String: Any]
+                    // dicts — one per crumb — so the dashboard can
+                    // render them as a timeline ordered alongside
+                    // the error. Each crumb's `message` + `data`
+                    // values are scrubbed.
+                    let crumbs: [[String: Any]] = event.breadcrumbs.map { crumb in
+                        var dict: [String: Any] = [
+                            "timestamp_ms": Int(crumb.timestamp.timeIntervalSince1970 * 1000),
+                            "category": crumb.category.rawValue,
+                            "level": crumb.level.rawValue,
+                            "message": scrub ? scrubPII(crumb.message) : crumb.message,
+                        ]
+                        if let data = crumb.data, !data.isEmpty {
+                            let scrubbedData = data.mapValues { scrub ? scrubPII($0) : $0 }
+                            dict["data"] = scrubbedData
+                        }
+                        return dict
+                    }
+                    props["error.breadcrumbs"] = AnyCodable(crumbs)
+                }
+
+                // Apply runtime beforeSend hook (replaceable via
+                // setErrorBeforeSend). Returning nil from the hook
+                // drops the event. Matches Web/Node/RN semantics.
+                if let hook = errorState.beforeSend {
+                    guard hook(event) != nil else {
+                        debugLogger(.sdkConsentDenied, [
+                            "channel": "errors",
+                            "reason": "beforeSend_returned_nil",
+                        ])
+                        return
+                    }
+                }
+
+                let wire = WireEvent(
+                    id: "err_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""),
+                    name: "$error",
+                    timestamp: event.timestamp,
+                    properties: props,
+                    anonymousId: identitySnapshot.anonymousId,
+                    developerUserId: identitySnapshot.developerUserId,
+                    crossdeckCustomerId: identitySnapshot.crossdeckCustomerId
+                )
+
+                // Enqueue is async (queue is an actor); we hand
+                // off via Task here, which is the same pattern the
+                // track() pipeline uses.
+                Task { await queueRef.enqueue(wire) }
             }
         )
     }

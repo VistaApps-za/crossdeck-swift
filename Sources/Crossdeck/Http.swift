@@ -44,17 +44,29 @@ public struct HTTPSendOutcome: Sendable {
 
 public actor HTTPClient {
     private let session: URLSession
+    /// Events endpoint — backwards-compat field, used by the queue
+    /// via the legacy `send(body:idempotencyKey:)` method below.
     private let endpoint: URL
-    private let writeKey: String
+    /// Base URL (e.g. `https://api.cross-deck.com/v1`). Used by the
+    /// generic `request(method:path:body:idempotencyKey:)` for every
+    /// endpoint other than `/events`.
+    private let baseUrl: URL
+    private let publicKey: String
     private let userAgent: String
 
     public init(
         endpoint: URL,
-        writeKey: String,
-        session: URLSession? = nil
+        publicKey: String,
+        session: URLSession? = nil,
+        baseUrl: URL? = nil
     ) {
         self.endpoint = endpoint
-        self.writeKey = writeKey
+        // If baseUrl wasn't supplied, derive it from the endpoint
+        // by stripping the `/events` suffix. Preserves backwards-
+        // compat with callers that only know about the events
+        // endpoint while still letting the generic path work.
+        self.baseUrl = baseUrl ?? endpoint.deletingLastPathComponent()
+        self.publicKey = publicKey
         self.userAgent = "\(SDK.name)/\(SDK.version)"
 
         if let session {
@@ -71,14 +83,73 @@ public actor HTTPClient {
         }
     }
 
+    /// Generic HTTP request — used by every endpoint other than the
+    /// queue's `/events` POST. Returns a normalised outcome the
+    /// caller can switch on the same way the queue does (success /
+    /// retryable / permanent). Supports GET (body=nil) and POST.
+    ///
+    /// `path` is appended to the configured `baseUrl` (e.g.
+    /// `path: "/sdk/heartbeat"` → `https://api.cross-deck.com/v1/sdk/heartbeat`).
+    /// Leading slash on `path` is normalised — both `"/foo"` and
+    /// `"foo"` work the same way.
+    ///
+    /// `query` is serialised as URL-encoded query string. Required
+    /// by GET endpoints that take identity hints (`/entitlements`
+    /// needs at least one of customerId/userId/anonymousId).
+    ///
+    /// `idempotencyKey` is sent as the `Idempotency-Key` header
+    /// when provided. Set for any mutating call where retry-safety
+    /// matters (alias, syncPurchases). GET-shaped calls leave it nil.
+    public func request(
+        method: String,
+        path: String,
+        body: Data? = nil,
+        query: [String: String]? = nil,
+        idempotencyKey: String? = nil
+    ) async -> HTTPSendOutcome {
+        let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        var url = baseUrl.appendingPathComponent(trimmed)
+        if let query, !query.isEmpty,
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            if let composed = components.url { url = composed }
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("Bearer \(publicKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        // Crossdeck-Sdk-Version header lets the backend populate the
+        // per-SDK-surface dashboard tile (sdkHeartbeats.{surface}).
+        // Drift here means the "iOS / macOS · Swift SDK" badge stays
+        // dark even though events are landing. Match Web/Node/RN
+        // header naming exactly.
+        req.setValue("\(SDK.name)@\(SDK.version)", forHTTPHeaderField: "Crossdeck-Sdk-Version")
+        if let idempotencyKey {
+            req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        }
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = body
+        }
+        return await dispatch(req)
+    }
+
     public func send(body: Data, idempotencyKey: String) async -> HTTPSendOutcome {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(writeKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(publicKey)", forHTTPHeaderField: "Authorization")
         req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        // Same per-SDK-surface registration as the generic path —
+        // the queue's batches need to register the SDK surface too.
+        req.setValue("\(SDK.name)@\(SDK.version)", forHTTPHeaderField: "Crossdeck-Sdk-Version")
         req.httpBody = body
+        return await dispatch(req)
+    }
+
+    private func dispatch(_ req: URLRequest) async -> HTTPSendOutcome {
 
         do {
             let (data, response) = try await session.data(for: req)

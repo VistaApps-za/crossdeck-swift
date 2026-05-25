@@ -24,9 +24,45 @@ public struct ConsentState: Sendable, Equatable {
     public var analytics: Bool
     public var errors: Bool
 
-    public init(analytics: Bool = false, errors: Bool = false) {
+    /// Default-GRANT for both channels — matches the Web/Node/RN
+    /// platform contract. The SDK ships events + errors by default;
+    /// consumers wire `setConsent(ConsentState(analytics: false))`
+    /// for a strict-consent flow (cookie banner / privacy-jurisdiction
+    /// gate). Default-deny would silently drop every event from a
+    /// developer following the docs verbatim — that's the wrong
+    /// failure mode for a telemetry SDK.
+    public init(analytics: Bool = true, errors: Bool = true) {
         self.analytics = analytics
         self.errors = errors
+    }
+}
+
+/// Sync-readable box for the current consent + scrub-PII state.
+/// Keeps non-isolated reads honest while the actor remains the
+/// single writer for state changes.
+final class ConsentStateBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var consent: ConsentState
+    private var scrub: Bool
+
+    init(consent: ConsentState, scrub: Bool) {
+        self.consent = consent
+        self.scrub = scrub
+    }
+
+    func snapshot() -> (consent: ConsentState, scrub: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (consent, scrub)
+    }
+
+    func setConsent(_ next: ConsentState) {
+        lock.lock(); defer { lock.unlock() }
+        consent = next
+    }
+
+    func setScrub(_ enabled: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        scrub = enabled
     }
 }
 
@@ -34,17 +70,32 @@ public actor ConsentManager {
     public private(set) var state: ConsentState
     public private(set) var scrubPII: Bool
 
+    /// Sync mirror — exposed via `nonisolated snapshotSync()` so the
+    /// error pipeline (which has to decide whether to drop or
+    /// enqueue an event without an async hop) can gate cheaply.
+    private let syncBox: ConsentStateBox
+
     public init(initial: ConsentState = ConsentState(), scrubPII: Bool = true) {
         self.state = initial
         self.scrubPII = scrubPII
+        self.syncBox = ConsentStateBox(consent: initial, scrub: scrubPII)
     }
 
     public func update(_ next: ConsentState) {
         state = next
+        syncBox.setConsent(next)
     }
 
     public func setScrubPII(_ enabled: Bool) {
         scrubPII = enabled
+        syncBox.setScrub(enabled)
+    }
+
+    /// Nonisolated sync snapshot used by hot-path consumers (error
+    /// pipeline gate, $error PII scrub decision) so they don't
+    /// pay an actor hop on every error.
+    public nonisolated func snapshotSync() -> (consent: ConsentState, scrub: Bool) {
+        return syncBox.snapshot()
     }
 }
 
@@ -76,8 +127,10 @@ private let cardRegex: NSRegularExpression? = {
 /// backend, web, node, and RN SDK constants.
 public func scrubPII(_ input: String) -> String {
     var s = input
-    let range = NSRange(s.startIndex..., in: s)
-
+    // The NSRange is recomputed for each replacement because the
+    // string length changes after the email pass — using a stale
+    // range for the card pass would either miss matches at the new
+    // tail or read past the end.
     if let regex = emailRegex {
         s = regex.stringByReplacingMatches(
             in: s,
@@ -87,7 +140,6 @@ public func scrubPII(_ input: String) -> String {
         )
     }
     if let regex = cardRegex {
-        _ = range
         s = regex.stringByReplacingMatches(
             in: s,
             options: [],

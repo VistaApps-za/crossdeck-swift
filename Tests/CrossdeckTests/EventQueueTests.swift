@@ -7,24 +7,33 @@ import XCTest
 /// own coverage in HttpTests; the queue layer here verifies the
 /// buffer / overflow / rehydration contracts in isolation.
 final class EventQueueIntegrationTests: XCTestCase {
+
+    private func makeHttp() -> HTTPClient {
+        return HTTPClient(
+            endpoint: URL(string: "https://example.invalid/v1/events")!,
+            publicKey: "cd_pub_test_x"
+        )
+    }
+
+    private func makeEnvelope() -> EventQueueEnvelope {
+        return EventQueueEnvelope(appId: "app_swift_tests", environment: .sandbox)
+    }
+
     func test_enqueue_persistsToStorage() async throws {
         let storage = MemoryStorage()
         let queue = EventQueue(
-            http: HTTPClient(
-                endpoint: URL(string: "https://example.invalid/v1/events")!,
-                writeKey: "test"
-            ),
+            http: makeHttp(),
             storage: storage,
+            envelope: makeEnvelope(),
             config: makeBatchConfig(batchSize: 100)
         )
 
         let event = makeWireEvent(name: "e1")
         await queue.enqueue(event)
 
-        // Persistence is async — give the actor a beat.
         await queue.persistAll()
 
-        let blob = storage.getString("queue.buffer")
+        let blob = storage.getString("queue.buffer.v1")
         XCTAssertNotNil(blob)
     }
 
@@ -32,23 +41,18 @@ final class EventQueueIntegrationTests: XCTestCase {
         let storage = MemoryStorage()
         do {
             let queue = EventQueue(
-                http: HTTPClient(
-                    endpoint: URL(string: "https://example.invalid/v1/events")!,
-                    writeKey: "test"
-                ),
+                http: makeHttp(),
                 storage: storage,
+                envelope: makeEnvelope(),
                 config: makeBatchConfig(batchSize: 100)
             )
             await queue.enqueue(makeWireEvent(name: "e1"))
             await queue.persistAll()
         }
-        // Fresh queue instance off same storage — should rehydrate.
         let queue2 = EventQueue(
-            http: HTTPClient(
-                endpoint: URL(string: "https://example.invalid/v1/events")!,
-                writeKey: "test"
-            ),
+            http: makeHttp(),
             storage: storage,
+            envelope: makeEnvelope(),
             config: makeBatchConfig(batchSize: 100)
         )
         let stats = await queue2.stats()
@@ -58,11 +62,9 @@ final class EventQueueIntegrationTests: XCTestCase {
     func test_stats_reportsBufferedCount() async {
         let storage = MemoryStorage()
         let queue = EventQueue(
-            http: HTTPClient(
-                endpoint: URL(string: "https://example.invalid/v1/events")!,
-                writeKey: "test"
-            ),
+            http: makeHttp(),
             storage: storage,
+            envelope: makeEnvelope(),
             config: makeBatchConfig(batchSize: 100)
         )
         await queue.enqueue(makeWireEvent(name: "e1"))
@@ -77,11 +79,9 @@ final class EventQueueIntegrationTests: XCTestCase {
         var cfg = makeBatchConfig(batchSize: 1_000)
         cfg.maxBufferSize = 3
         let queue = EventQueue(
-            http: HTTPClient(
-                endpoint: URL(string: "https://example.invalid/v1/events")!,
-                writeKey: "test"
-            ),
+            http: makeHttp(),
             storage: storage,
+            envelope: makeEnvelope(),
             config: cfg
         )
         for i in 0..<10 {
@@ -102,12 +102,12 @@ final class EventQueueIntegrationTests: XCTestCase {
 
     private func makeWireEvent(name: String) -> WireEvent {
         return WireEvent(
-            id: "cdevt_test_\(UUID().uuidString)",
+            id: "evt_test_\(UUID().uuidString)",
             name: name,
             timestamp: Date(),
             properties: [:],
-            anonymousId: "cdanon_test",
-            customerId: nil
+            anonymousId: "anon_test",
+            developerUserId: nil
         )
     }
 }

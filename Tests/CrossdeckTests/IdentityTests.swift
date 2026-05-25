@@ -6,8 +6,8 @@ final class IdentityTests: XCTestCase {
         let storage = MemoryStorage()
         let identity = Identity(storage: storage)
         let snap = await identity.snapshot()
-        XCTAssertTrue(snap.anonymousId.hasPrefix("cdanon_"))
-        XCTAssertNil(snap.customerId)
+        XCTAssertTrue(snap.anonymousId.hasPrefix("anon_"))
+        XCTAssertNil(snap.developerUserId)
     }
 
     func test_persistsAnonymousId_acrossInstances() async {
@@ -21,39 +21,39 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(firstId, secondId)
     }
 
-    func test_setCustomerId_isIdempotent() async {
+    func test_setDeveloperUserId_isIdempotent() async {
         let storage = MemoryStorage()
         let identity = Identity(storage: storage)
-        let first = await identity.setCustomerId("u_1")
-        let second = await identity.setCustomerId("u_1")
+        let first = await identity.setDeveloperUserId("u_1")
+        let second = await identity.setDeveloperUserId("u_1")
         XCTAssertTrue(first)
         XCTAssertFalse(second)
         let snap = await identity.snapshot()
-        XCTAssertEqual(snap.customerId, "u_1")
+        XCTAssertEqual(snap.developerUserId, "u_1")
     }
 
-    func test_setCustomerId_normalisesWhitespace_andNilsEmpty() async {
+    func test_setDeveloperUserId_normalisesWhitespace_andNilsEmpty() async {
         let storage = MemoryStorage()
         let identity = Identity(storage: storage)
-        _ = await identity.setCustomerId("  u_1  ")
+        _ = await identity.setDeveloperUserId("  u_1  ")
         var snap = await identity.snapshot()
-        XCTAssertEqual(snap.customerId, "u_1")
+        XCTAssertEqual(snap.developerUserId, "u_1")
 
-        _ = await identity.setCustomerId("")
+        _ = await identity.setDeveloperUserId("")
         snap = await identity.snapshot()
-        XCTAssertNil(snap.customerId)
+        XCTAssertNil(snap.developerUserId)
     }
 
     func test_reset_regeneratesAnonymousId_andClearsCustomer() async {
         let storage = MemoryStorage()
         let identity = Identity(storage: storage)
-        _ = await identity.setCustomerId("u_1")
+        _ = await identity.setDeveloperUserId("u_1")
         let before = await identity.snapshot()
 
         await identity.reset()
         let after = await identity.snapshot()
 
         XCTAssertNotEqual(before.anonymousId, after.anonymousId)
-        XCTAssertNil(after.customerId)
+        XCTAssertNil(after.developerUserId)
     }
 }

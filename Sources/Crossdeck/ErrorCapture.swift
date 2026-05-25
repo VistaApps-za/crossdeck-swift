@@ -7,20 +7,29 @@
 //     fatal bug (the app is about to be killed) but the handler
 //     gives us a few hundred ms to ship one last event.
 //
-//  2) Swift's `signal(...)` handlers for crash signals (SIGSEGV,
-//     SIGABRT, SIGFPE, SIGILL, SIGBUS, SIGTRAP). These come from
-//     C / Swift code paths the Obj-C handler misses.
+//  2) Manual captureError(_:handled:) for handled-in-catch errors.
 //
-// Both paths converge on a single `capture(...)` method that
-// builds an error event, attaches breadcrumbs, and forces a
-// synchronous flush. The synchronous flush is a best-effort — we
-// have a finite budget before the process is killed, and the
-// alternative (lose the event entirely) is worse.
+// Both paths converge on a single dispatch method that runs the
+// consumer's beforeSend hook, then ships the event via the
+// configured capture sink.
+//
+// Crash-reporter coexistence: NSSetUncaughtExceptionHandler is a
+// PROCESS-wide singleton. Crashlytics, Sentry, Bugsnag, and
+// Firebase Crashlytics all want it. On install we CHAIN — capture
+// the prior handler (whoever registered last before us) and
+// invoke it AFTER our own snapshot. Existing crash reporters
+// stay populated; we snapshot one last event before they kill
+// the process.
+//
+// Feedback-loop defence: a self-request skip is wired so HTTP
+// failures targeting the configured ingest endpoint are dropped
+// from the error pipeline. Without it, a transient ingest 5xx
+// would generate an $error event, which would itself fail to
+// send, which would generate another error… a perfect storm.
 //
 // The `beforeSend` hook gives the consumer one last chance to
 // filter or transform errors. If beforeSend returns nil, the
-// error is dropped. This is the standard Sentry-style escape
-// hatch for "don't ship internal errors I already handled" cases.
+// error is dropped.
 
 import Foundation
 
@@ -55,9 +64,9 @@ public struct CapturedError: Sendable, Codable {
 }
 
 /// Singleton-shaped error capture coordinator. Apple's exception
-/// handler is a global C function, so we cannot make it per-Crossdeck-
-/// instance — instead, we install once and dispatch through a
-/// process-wide `weak` reference to the active capture.
+/// handler is a global C function, so we cannot make it per-
+/// Crossdeck-instance — instead we install once and dispatch
+/// through a process-wide weak reference to the active capture.
 public final class ErrorCapture: @unchecked Sendable {
     public static let shared = ErrorCapture()
     private init() {}
@@ -66,14 +75,22 @@ public final class ErrorCapture: @unchecked Sendable {
     private var beforeSend: BeforeSendErrorHandler?
     private var captureHandler: (@Sendable (CapturedError) -> Void)?
     private var breadcrumbsSnapshot: (@Sendable () async -> [Breadcrumb])?
+    private var selfHostname: String?
     private var installed = false
 
-    /// Install the global handlers (NSSetUncaughtExceptionHandler
-    /// + signal handlers). Idempotent — calling twice replaces the
-    /// handler but does not re-register.
+    /// Prior NSException handler captured at install time so we
+    /// can chain into it after our own snapshot — preserving
+    /// Crashlytics / Sentry / Bugsnag if they were registered
+    /// before us.
+    private var priorExceptionHandler: (@convention(c) (NSException) -> Void)?
+
+    /// Install the global handlers (NSSetUncaughtExceptionHandler).
+    /// Idempotent — calling twice replaces the routing but does
+    /// not re-register the global C hook.
     public func install(
         beforeSend: BeforeSendErrorHandler?,
         breadcrumbs: @escaping @Sendable () async -> [Breadcrumb],
+        selfHostname: String?,
         capture: @escaping @Sendable (CapturedError) -> Void
     ) {
         lock.lock()
@@ -81,9 +98,16 @@ public final class ErrorCapture: @unchecked Sendable {
         self.beforeSend = beforeSend
         self.captureHandler = capture
         self.breadcrumbsSnapshot = breadcrumbs
+        self.selfHostname = selfHostname
 
         guard !installed else { return }
         installed = true
+
+        // Chain into whatever handler was registered before us
+        // (Crashlytics, Sentry, etc.). If we don't capture this,
+        // we silently break every other crash reporter on the
+        // device.
+        self.priorExceptionHandler = NSGetUncaughtExceptionHandler()
 
         NSSetUncaughtExceptionHandler { exception in
             ErrorCapture.shared.captureFromExceptionHandler(exception)
@@ -93,21 +117,32 @@ public final class ErrorCapture: @unchecked Sendable {
     /// Stop capturing. Removes the handler routing but leaves the
     /// global handler installed — Apple does not provide a clean
     /// way to remove NSSetUncaughtExceptionHandler, so subsequent
-    /// uncaught exceptions will hit a no-op until install() is
-    /// called again.
+    /// uncaught exceptions will hit the chained prior handler (or
+    /// nothing) until install() is called again.
     public func uninstall() {
         lock.lock()
         defer { lock.unlock() }
         self.beforeSend = nil
         self.captureHandler = nil
         self.breadcrumbsSnapshot = nil
+        self.selfHostname = nil
     }
 
-    /// Public API for manual capture (e.g. inside a do/catch).
+    /// Manual capture path for handled errors (do/catch flows).
     public func captureError(
         _ error: Error,
         handled: Bool = true
     ) {
+        // Self-request skip: if the error is a URLError whose URL
+        // host matches our ingest endpoint, drop it before any
+        // processing — these errors are the SDK observing its own
+        // failed network calls (typically wrapped by a consumer's
+        // logging middleware) and reporting them feeds a loop.
+        let selfHostnameCopy = lock.withLock { self.selfHostname }
+        if let selfHostnameCopy, errorMatchesSelfHost(error, host: selfHostnameCopy) {
+            return
+        }
+
         let stack = Thread.callStackSymbols
         let frames = parseStackSymbols(stack)
         let fingerprint = fingerprintFromStack(stack)
@@ -122,8 +157,9 @@ public final class ErrorCapture: @unchecked Sendable {
             message = String(describing: error)
         }
 
+        let breadcrumbsProvider = lock.withLock { self.breadcrumbsSnapshot }
         Task {
-            let crumbs = await breadcrumbsSnapshot?() ?? []
+            let crumbs = await breadcrumbsProvider?() ?? []
             let event = CapturedError(
                 type: typeName,
                 message: message,
@@ -150,22 +186,27 @@ public final class ErrorCapture: @unchecked Sendable {
             handled: false
         )
         dispatch(event)
+
+        // Chain into the prior handler (Crashlytics, Sentry, …)
+        // AFTER our snapshot so their crash report still fires.
+        // We never want to be the reason an upstream reporter
+        // loses a crash.
+        let prior = lock.withLock { self.priorExceptionHandler }
+        prior?(exception)
     }
 
     private func dispatch(_ event: CapturedError) {
-        let (beforeSendCopy, captureCopy): (BeforeSendErrorHandler?, (@Sendable (CapturedError) -> Void)?) = {
-            lock.lock()
-            defer { lock.unlock() }
+        let (beforeSendCopy, captureCopy): (BeforeSendErrorHandler?, (@Sendable (CapturedError) -> Void)?) = lock.withLock {
             return (beforeSend, captureHandler)
-        }()
+        }
 
         let final: CapturedError?
         if let beforeSendCopy {
-            // Safety net — if user's beforeSend throws / crashes,
-            // we don't drop the event silently; we ship it as-is.
-            // Swift can't catch fatalError from a closure, but
-            // ObjC exceptions from cross-language closures can be
-            // caught with @objc. Best-effort.
+            // Safety net — if user's beforeSend throws / fatals,
+            // we'd rather lose the hook than the event. Swift
+            // can't catch fatalError from a closure; the best
+            // we can do is not let beforeSend's silence cause an
+            // accidental drop further down the pipeline.
             final = beforeSendCopy(event)
         } else {
             final = event
@@ -173,5 +214,32 @@ public final class ErrorCapture: @unchecked Sendable {
 
         guard let final, let captureCopy else { return }
         captureCopy(final)
+    }
+
+    /// True iff the error's underlying URL (if any) targets the
+    /// SDK's own ingest endpoint. Used to break the feedback loop
+    /// where reporting a failed ingest triggers another failed
+    /// ingest report.
+    private func errorMatchesSelfHost(_ error: Error, host: String) -> Bool {
+        if let urlError = error as? URLError, let urlHost = urlError.failingURL?.host {
+            return urlHost.lowercased() == host.lowercased()
+        }
+        if let cdError = error as? CrossdeckError,
+           cdError.message.range(of: host, options: .caseInsensitive) != nil {
+            return true
+        }
+        // String-based catch-all for arbitrary error types that
+        // serialise to descriptions containing the endpoint URL.
+        let description = String(describing: error)
+        return description.range(of: host, options: .caseInsensitive) != nil
+    }
+}
+
+// MARK: - Lock helper
+
+private extension NSLock {
+    func withLock<T>(_ block: () -> T) -> T {
+        lock(); defer { unlock() }
+        return block()
     }
 }

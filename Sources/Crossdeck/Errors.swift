@@ -47,7 +47,7 @@ public enum CrossdeckErrorType: String, Sendable, Codable {
 public struct CrossdeckError: Error, Sendable {
     public let type: CrossdeckErrorType
 
-    /// Stable machine-readable token. Examples: `not_started`,
+    /// Stable machine-readable token. Examples: `not_initialized`,
     /// `missing_event_name`, `invalid_event_properties`. Never
     /// localised — clients pattern-match on this.
     public let code: String

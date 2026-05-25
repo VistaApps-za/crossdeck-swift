@@ -50,11 +50,14 @@ final class ConsentTests: XCTestCase {
         XCTAssertNotNil(scrubbed)
     }
 
-    func test_consentManager_defaultsToDeny() async {
+    func test_consentManager_defaultsToGrant() async {
+        // Default-GRANT matches the platform-wide Web/Node/RN
+        // contract. Consumers wire `setConsent(...)` to opt-out
+        // for strict-consent flows (cookie banner, EU age gate).
         let m = ConsentManager()
         let state = await m.state
-        XCTAssertFalse(state.analytics)
-        XCTAssertFalse(state.errors)
+        XCTAssertTrue(state.analytics)
+        XCTAssertTrue(state.errors)
     }
 
     func test_consentManager_updateAppliesState() async {

@@ -1,156 +1,200 @@
-// Wire-level event validation + DAG-safe circular detection.
+// Wire-level event-property sanitisation + warning model.
 //
-// Two failure modes we have to defend against before an event
-// reaches the queue:
+// **Behaviour contract (matches Web/Node/RN exactly):**
 //
-//  1) Caller-provided shapes that JSONSerialization will reject —
-//     a CGFloat.nan property, a Date with no encoder, an opaque
-//     class instance. We surface those as `invalid_request_error`
-//     up-front rather than letting the queue blow up at flush time
-//     (where the failure is asynchronous and harder to attribute).
+//   sanitise + warn, NEVER throw.
 //
-//  2) Cyclic object graphs. Swift's `[String: Any]` doesn't
-//     naturally cycle, but a class-type value inside the dictionary
-//     can hold a reference back to the dictionary's container. We
-//     walk the graph keeping an ancestor stack of class identities
-//     and refuse to recurse into an already-seen ancestor.
+// `track()` is fire-and-forget — making it throw on a single
+// non-encodable property would break the consumer's call site in a
+// way `try?` silently swallows. Instead: the validator returns a
+// cleaned copy with non-encodable / unsafe values coerced or
+// dropped, plus a list of warnings the consumer can route to a
+// debug logger.
 //
-// "DAG-safe" means: a diamond — same leaf reached via two
-// independent ancestor chains — is allowed. Only a true cycle
-// (an ancestor reachable from itself) trips the guard. The
-// implementation matches the web/RN SDK pattern: add to the
-// ancestor set on entry, REMOVE on exit, so siblings don't
-// poison each other.
+// Coercion rules:
+//   * `Date`               → ISO 8601 string
+//   * `URL`                → absoluteString
+//   * `UUID`               → string
+//   * `Double.nan / inf`   → NSNull, warning emitted
+//   * `Float.nan / inf`    → NSNull, warning emitted
+//   * `String` > maxStr    → truncated with ellipsis, warning emitted
+//   * Cyclic NS containers → `"[circular]"`, warning emitted
+//   * Depth > maxDepth     → `"[depth-exceeded]"`, warning emitted
+//   * Non-encodable class  → dropped, warning emitted
+//
+// All warning kinds match the Web/Node/RN `ValidationWarning.kind`
+// taxonomy so cross-platform consumers can wire one debug-routing
+// pipeline across all SDKs.
 
 import Foundation
 
-/// Maximum depth before we declare the payload pathological.
-/// 32 matches what JSON-Schema validators tend to draw as a
-/// "deeply nested" threshold. A real analytics event has
-/// 1–4 levels of nesting; anything past 32 is a bug or attack.
-let validationMaxDepth = 32
+/// Maximum string length on any single property value. Strings
+/// longer than this get truncated with an ellipsis suffix.
+public let maxStringLength: Int = 1024
 
-/// Validate an event property map. Throws CrossdeckError on the
-/// first violation. Caller pattern: try validateEventProperties(...)
-/// before enqueue; on throw, surface the error to the caller of
-/// `track()` synchronously.
-public func validateEventProperties(_ properties: [String: Any]) throws {
-    var ancestors: [ObjectIdentifier] = []
-    try walkValidate(properties, key: "<root>", depth: 0, ancestors: &ancestors)
+/// Maximum nesting depth before the validator stops recursing.
+public let validationMaxDepth: Int = 32
+
+/// Reason a property was modified during sanitisation. Matches the
+/// Web/Node/RN `ValidationWarning.kind` enum exactly.
+public enum ValidationWarningKind: String, Sendable {
+    case depthExceeded = "depth_exceeded"
+    case circularReference = "circular_reference"
+    case truncatedString = "truncated_string"
+    case nonSerialisable = "non_serialisable"
+    case notFinite = "not_finite"
 }
 
-private func walkValidate(
-    _ value: Any,
+public struct ValidationWarning: Sendable, Equatable {
+    public let key: String
+    public let kind: ValidationWarningKind
+
+    public init(key: String, kind: ValidationWarningKind) {
+        self.key = key
+        self.kind = kind
+    }
+}
+
+/// `properties` holds the cleaned, JSON-encodable bag. Marked
+/// `@unchecked Sendable` because the validator guarantees only
+/// primitive JSON types survive the sanitise pass (String, Bool,
+/// Int/Double/etc., Array, Dictionary, NSNull) — every reference
+/// type that's not a JSON container is dropped. The compiler can't
+/// prove this so we vouch for it.
+public struct ValidationResult: @unchecked Sendable {
+    public let properties: [String: Any]
+    public let warnings: [ValidationWarning]
+}
+
+/// Sanitise an event property map. Returns the cleaned bag plus a
+/// list of warnings. NEVER throws — the bank-grade contract is that
+/// `track()` always proceeds, even when properties had to be
+/// coerced. Warnings are surfaced via the debug logger; the cleaned
+/// bag is what ships on the wire.
+public func validateEventProperties(_ properties: [String: Any]) -> ValidationResult {
+    var warnings: [ValidationWarning] = []
+    var ancestors: [ObjectIdentifier] = []
+    let cleaned = sanitiseValue(
+        properties,
+        key: "<root>",
+        depth: 0,
+        ancestors: &ancestors,
+        warnings: &warnings
+    )
+    let bag = (cleaned as? [String: Any]) ?? [:]
+    return ValidationResult(properties: bag, warnings: warnings)
+}
+
+private func sanitiseValue(
+    _ value: Any?,
     key: String,
     depth: Int,
-    ancestors: inout [ObjectIdentifier]
-) throws {
+    ancestors: inout [ObjectIdentifier],
+    warnings: inout [ValidationWarning]
+) -> Any? {
     if depth > validationMaxDepth {
-        throw CrossdeckError(
-            type: .invalidRequest,
-            code: "event_properties_too_deep",
-            message: "Event properties exceed max nesting depth (\(validationMaxDepth))."
-        )
+        warnings.append(ValidationWarning(key: key, kind: .depthExceeded))
+        return "[depth-exceeded]"
     }
 
-    // Primitive bail-outs (cheap path).
-    if value is String || value is Bool { return }
+    guard let value else { return nil }
 
-    // Numerics: reject NaN / infinity since JSON has no representation.
-    if let d = value as? Double {
-        guard d.isFinite else {
-            throw CrossdeckError(
-                type: .invalidRequest,
-                code: "event_property_not_finite",
-                message: "Property '\(key)' is NaN or infinite — not JSON-encodable."
-            )
+    // String — truncate if oversize.
+    if let s = value as? String {
+        if s.count > maxStringLength {
+            warnings.append(ValidationWarning(key: key, kind: .truncatedString))
+            return String(s.prefix(maxStringLength - 1)) + "…"
         }
-        return
+        return s
+    }
+
+    if value is Bool { return value }
+
+    // Numerics: reject NaN / infinity (no JSON representation).
+    if let d = value as? Double {
+        if !d.isFinite {
+            warnings.append(ValidationWarning(key: key, kind: .notFinite))
+            return NSNull()
+        }
+        return d
     }
     if let f = value as? Float {
-        guard f.isFinite else {
-            throw CrossdeckError(
-                type: .invalidRequest,
-                code: "event_property_not_finite",
-                message: "Property '\(key)' is NaN or infinite — not JSON-encodable."
-            )
+        if !f.isFinite {
+            warnings.append(ValidationWarning(key: key, kind: .notFinite))
+            return NSNull()
         }
-        return
+        return f
     }
     if value is Int || value is Int32 || value is Int64
         || value is UInt || value is UInt32 || value is UInt64 {
-        return
+        return value
     }
+    if value is NSNull { return value }
 
-    // NSNull → JSON null (allowed).
-    if value is NSNull { return }
+    // Coerce common Foundation types into JSON-friendly shapes.
+    if let date = value as? Date {
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: date)
+    }
+    if let url = value as? URL { return url.absoluteString }
+    if let uuid = value as? UUID { return uuid.uuidString }
 
-    // Reference-type containers FIRST. NSMutableDictionary /
-    // NSMutableArray bridge to [String: Any] / [Any] via Swift's
-    // implicit-cast rules, so if we let the value-type branches run
-    // first we'd lose the chance to track object identity for cycle
-    // detection. Class containers can cycle; value-type containers
-    // cannot.
+    // Reference-type containers — cycle-checked + recursive.
     if let dict = value as? NSDictionary {
-        // NSDictionary covers both immutable and NSMutableDictionary.
-        // Skip the cycle check for the bridged-immutable case (which
-        // is value-shaped and can't form an in-memory cycle) only by
-        // checking that the value actually IS the same instance on
-        // re-entry — ancestors.contains handles this naturally.
         let id = ObjectIdentifier(dict)
         if ancestors.contains(id) {
-            throw CrossdeckError(
-                type: .invalidRequest,
-                code: "event_properties_cyclic",
-                message: "Property '\(key)' contains a cyclic reference."
-            )
+            warnings.append(ValidationWarning(key: key, kind: .circularReference))
+            return "[circular]"
         }
         ancestors.append(id)
         defer { ancestors.removeLast() }
+        var out: [String: Any] = [:]
         for (k, v) in dict {
             let keyName = (k as? String) ?? "\(k)"
-            try walkValidate(v, key: keyName, depth: depth + 1, ancestors: &ancestors)
+            if let cleaned = sanitiseValue(v, key: keyName, depth: depth + 1, ancestors: &ancestors, warnings: &warnings) {
+                out[keyName] = cleaned
+            }
         }
-        return
+        return out
     }
-
     if let arr = value as? NSArray {
         let id = ObjectIdentifier(arr)
         if ancestors.contains(id) {
-            throw CrossdeckError(
-                type: .invalidRequest,
-                code: "event_properties_cyclic",
-                message: "Property '\(key)' contains a cyclic reference."
-            )
+            warnings.append(ValidationWarning(key: key, kind: .circularReference))
+            return "[circular]"
         }
         ancestors.append(id)
         defer { ancestors.removeLast() }
+        var out: [Any] = []
         for (i, v) in arr.enumerated() {
-            try walkValidate(v, key: "\(key)[\(i)]", depth: depth + 1, ancestors: &ancestors)
+            if let cleaned = sanitiseValue(v, key: "\(key)[\(i)]", depth: depth + 1, ancestors: &ancestors, warnings: &warnings) {
+                out.append(cleaned)
+            }
         }
-        return
+        return out
     }
 
-    // Value-type containers. No cycle check needed — Swift value
-    // semantics make in-memory cycles impossible for these.
+    // Value-type containers — Swift arrays + dicts can't cycle.
     if let arr = value as? [Any] {
+        var out: [Any] = []
         for (i, v) in arr.enumerated() {
-            try walkValidate(v, key: "\(key)[\(i)]", depth: depth + 1, ancestors: &ancestors)
+            if let cleaned = sanitiseValue(v, key: "\(key)[\(i)]", depth: depth + 1, ancestors: &ancestors, warnings: &warnings) {
+                out.append(cleaned)
+            }
         }
-        return
+        return out
     }
-
     if let dict = value as? [String: Any] {
+        var out: [String: Any] = [:]
         for (k, v) in dict {
-            try walkValidate(v, key: k, depth: depth + 1, ancestors: &ancestors)
+            if let cleaned = sanitiseValue(v, key: k, depth: depth + 1, ancestors: &ancestors, warnings: &warnings) {
+                out[k] = cleaned
+            }
         }
-        return
+        return out
     }
 
-    // Unknown class instance → not JSON-serialisable.
-    throw CrossdeckError(
-        type: .invalidRequest,
-        code: "event_property_not_encodable",
-        message: "Property '\(key)' of type \(type(of: value)) cannot be encoded to JSON."
-    )
+    // Unknown reference type — not JSON-serialisable. Drop + warn.
+    warnings.append(ValidationWarning(key: key, kind: .nonSerialisable))
+    return nil
 }

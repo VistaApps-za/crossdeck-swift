@@ -2,74 +2,94 @@ import XCTest
 @testable import Crossdeck
 
 final class EntitlementCacheTests: XCTestCase {
-    func test_emptyCache_returnsNil() async {
-        let storage = MemoryStorage()
-        let cache = EntitlementCache(storage: storage)
-        let set = await cache.entitlements(for: "u_1")
-        XCTAssertNil(set)
+
+    private func makeEntitlement(_ key: String, validUntil: Int64? = nil) -> PublicEntitlement {
+        return PublicEntitlement(
+            key: key,
+            isActive: true,
+            validUntil: validUntil,
+            source: PublicEntitlement.EntitlementSource(
+                rail: .apple,
+                productId: "com.example.\(key)",
+                subscriptionId: "sub_test_\(key)"
+            ),
+            updatedAt: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+    }
+
+    func test_emptyCache_returnsFalseOrNil() {
+        let cache = EntitlementCache(storage: MemoryStorage())
+        XCTAssertFalse(cache.isEntitledSync("pro", for: "u_1"))
+        XCTAssertNil(cache.entitlementsSync(for: "u_1"))
     }
 
     func test_writeThenRead_roundTrip() async {
-        let storage = MemoryStorage()
-        let cache = EntitlementCache(storage: storage)
+        let cache = EntitlementCache(storage: MemoryStorage())
         let snap = EntitlementSnapshot(
-            customerId: "u_1",
-            entitlements: ["pro", "team"]
+            developerUserId: "u_1",
+            entitlements: [makeEntitlement("pro"), makeEntitlement("team")]
         )
         await cache.write(snap)
-        let set = await cache.entitlements(for: "u_1")
-        XCTAssertEqual(set, ["pro", "team"])
+        XCTAssertTrue(cache.isEntitledSync("pro", for: "u_1"))
+        XCTAssertTrue(cache.isEntitledSync("team", for: "u_1"))
+        XCTAssertFalse(cache.isEntitledSync("enterprise", for: "u_1"))
     }
 
-    func test_doesNotLeakAcrossCustomers() async {
-        let storage = MemoryStorage()
-        let cache = EntitlementCache(storage: storage)
+    func test_doesNotLeakAcrossUsers() async {
+        let cache = EntitlementCache(storage: MemoryStorage())
         await cache.write(EntitlementSnapshot(
-            customerId: "u_1",
-            entitlements: ["pro"]
+            developerUserId: "u_1",
+            entitlements: [makeEntitlement("pro")]
         ))
-        // u_2 was never written — must NOT receive u_1's set.
-        let set = await cache.entitlements(for: "u_2")
-        XCTAssertNil(set)
+        XCTAssertFalse(cache.isEntitledSync("pro", for: "u_2"))
+        XCTAssertNil(cache.entitlementsSync(for: "u_2"))
     }
 
     func test_clear_removesSnapshot() async {
-        let storage = MemoryStorage()
-        let cache = EntitlementCache(storage: storage)
+        let cache = EntitlementCache(storage: MemoryStorage())
         await cache.write(EntitlementSnapshot(
-            customerId: "u_1",
-            entitlements: ["pro"]
+            developerUserId: "u_1",
+            entitlements: [makeEntitlement("pro")]
         ))
         await cache.clear()
-        let set = await cache.entitlements(for: "u_1")
-        XCTAssertNil(set)
+        XCTAssertFalse(cache.isEntitledSync("pro", for: "u_1"))
+        XCTAssertNil(cache.entitlementsSync(for: "u_1"))
     }
 
     func test_persistsAcrossInstances() async {
         let storage = MemoryStorage()
         let first = EntitlementCache(storage: storage)
         await first.write(EntitlementSnapshot(
-            customerId: "u_1",
-            entitlements: ["pro"]
+            developerUserId: "u_1",
+            entitlements: [makeEntitlement("pro")]
         ))
-
         let second = EntitlementCache(storage: storage)
-        let set = await second.entitlements(for: "u_1")
-        XCTAssertEqual(set, ["pro"])
+        XCTAssertTrue(second.isEntitledSync("pro", for: "u_1"))
     }
 
-    func test_isEntitled_quickCheck() async {
-        let storage = MemoryStorage()
-        let cache = EntitlementCache(storage: storage)
+    func test_validUntilExpired_filteredOut() async {
+        let cache = EntitlementCache(storage: MemoryStorage())
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let expired = makeEntitlement("pro", validUntil: nowMs - 1_000)
         await cache.write(EntitlementSnapshot(
-            customerId: "u_1",
-            entitlements: ["pro", "team"]
+            developerUserId: "u_1",
+            entitlements: [expired]
         ))
-        let yes = await cache.isEntitled("pro", for: "u_1")
-        let no = await cache.isEntitled("enterprise", for: "u_1")
-        let wrongCustomer = await cache.isEntitled("pro", for: "u_2")
-        XCTAssertTrue(yes)
-        XCTAssertFalse(no)
-        XCTAssertFalse(wrongCustomer)
+        XCTAssertFalse(cache.isEntitledSync("pro", for: "u_1"))
+        XCTAssertEqual(cache.entitlementsSync(for: "u_1")?.count, 0)
+    }
+
+    func test_markRefreshFailed_keepsExistingEntitlementsLive() async {
+        // Bank-grade contract: a Crossdeck outage must not fail a
+        // paying customer down to free. Last-known-good wins.
+        let cache = EntitlementCache(storage: MemoryStorage())
+        await cache.write(EntitlementSnapshot(
+            developerUserId: "u_1",
+            entitlements: [makeEntitlement("pro")]
+        ))
+        await cache.markRefreshFailed()
+        XCTAssertTrue(cache.isEntitledSync("pro", for: "u_1"))
+        let freshness = cache.freshness()
+        XCTAssertNotNil(freshness?.lastRefreshFailedAt)
     }
 }

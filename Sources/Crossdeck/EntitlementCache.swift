@@ -1,77 +1,179 @@
 // Entitlement cache.
 //
-// Stores the most recently fetched entitlement set for a customer,
-// keyed by customerId so we don't accidentally serve a previous
-// user's entitlements to a freshly-identified one. Acts as both:
+// Stores the most recently fetched entitlement set for a customer
+// scoped to their identity (developerUserId for v1.0.x; will swap
+// to crossdeckCustomerId in v1.1 once /identity/alias persistence
+// is wired). Two roles:
 //
-//   * The synchronous answer source for `isEntitled(...)` (the
-//     consumer cannot afford a network round-trip on a paywall
-//     gate, so we hand back whatever we have).
+//   * Synchronous source for `isEntitled(...)` paywall gates —
+//     consumers cannot afford a network round-trip on a tap handler.
 //
-//   * A subscriber broadcast so the UI can re-render when the
-//     cache updates from a server fetch.
+//   * Subscriber broadcast so the UI can re-render when the cache
+//     updates from a server fetch.
 //
-// Persistence: serialised to a single JSON blob with both the
-// customerId and the set, so a launch with the same customerId
-// gets a hot read; a launch with a different customerId (after
-// reset() / re-identify) ignores the stored blob and starts cold.
+// **Bank-grade durability model (matches Web/Node/RN):**
+//
+//   * Persisted as a single JSON blob with both customerId AND set,
+//     so a launch with the same customerId gets a hot read; a launch
+//     with a different customerId ignores the stored blob and starts
+//     cold.
+//
+//   * Per-entitlement `validUntil` honoured — a snapshot can be
+//     fresh on the metadata level while a specific entitlement has
+//     already expired. `isEntitled` checks both `isActive` AND
+//     `validUntil > now`.
+//
+//   * Staleness model: `staleAfterMs` (default 60s) marks a snapshot
+//     as stale even though it's still authoritative — UI can show a
+//     refresh spinner. `markRefreshFailed()` records the timestamp
+//     of the last failed refresh attempt so a Crossdeck outage
+//     doesn't fail a paying customer down to free (last-known-good
+//     wins; only a HARD permanent rejection clears the cache).
 
 import Foundation
 
-public struct EntitlementSnapshot: Sendable, Equatable, Codable {
-    public let customerId: String
-    public let entitlements: Set<String>
-    public let updatedAt: Date
+/// Default staleness window — 60s matches the Web/Node/RN platform
+/// contract. Snapshots older than this are surfaced as `isStale`
+/// for UI refresh hints, but `isEntitled` still honours them.
+public let defaultEntitlementStaleAfterMs: Int64 = 60_000
 
-    public init(customerId: String, entitlements: Set<String>, updatedAt: Date = Date()) {
-        self.customerId = customerId
+/// Snapshot of the entitlement cache for a single user identity.
+public struct EntitlementSnapshot: Sendable, Equatable, Codable {
+    /// The identity these entitlements belong to. v1.0.x: the
+    /// developerUserId; v1.1+: will swap to crossdeckCustomerId.
+    public let developerUserId: String
+    public let entitlements: [PublicEntitlement]
+    /// Epoch ms when the cache was last populated by a successful
+    /// `GET /entitlements` or `POST /purchases/sync`.
+    public let lastUpdated: Int64
+    /// Epoch ms of the last failed refresh attempt. Used by the
+    /// staleness model — a paying customer never gets failed down
+    /// to free during a transient outage; only a successful refresh
+    /// can replace the cache.
+    public let lastRefreshFailedAt: Int64?
+
+    public init(
+        developerUserId: String,
+        entitlements: [PublicEntitlement],
+        lastUpdated: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
+        lastRefreshFailedAt: Int64? = nil
+    ) {
+        self.developerUserId = developerUserId
         self.entitlements = entitlements
-        self.updatedAt = updatedAt
+        self.lastUpdated = lastUpdated
+        self.lastRefreshFailedAt = lastRefreshFailedAt
     }
 }
 
 public typealias EntitlementSubscriber = @Sendable (EntitlementSnapshot?) -> Void
 
+/// Sync-readable box for the latest entitlement snapshot.
+///
+/// The `EntitlementCache` actor is the source of truth for writes,
+/// but paywall gates need to query "is this customer entitled?" on
+/// the caller's thread — and a Swift actor cannot offer a fully
+/// synchronous read from a non-isolated context. We mirror the
+/// actor's current state into an `NSLock`-protected box. The actor
+/// writes through the box on every mutation; sync readers
+/// (`Crossdeck.isEntitled`) read from it without ever touching
+/// the actor.
+final class EntitlementSnapshotBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: EntitlementSnapshot?
+
+    func read() -> EntitlementSnapshot? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func write(_ snapshot: EntitlementSnapshot?) {
+        lock.lock(); defer { lock.unlock() }
+        value = snapshot
+    }
+}
+
 public actor EntitlementCache {
     private let storage: Storage
-    private let storageKey: String = "entitlements.snapshot"
+    private let storageKey: String = "entitlements"
+    private let staleAfterMs: Int64
 
     private var current: EntitlementSnapshot?
     private var subscribers: [UUID: EntitlementSubscriber] = [:]
+    private let syncBox = EntitlementSnapshotBox()
 
-    public init(storage: Storage) {
+    public init(storage: Storage, staleAfterMs: Int64 = defaultEntitlementStaleAfterMs) {
         self.storage = storage
+        self.staleAfterMs = staleAfterMs
         if let blob = storage.getString(storageKey),
            let data = blob.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(EntitlementSnapshot.self, from: data) {
             self.current = decoded
+            self.syncBox.write(decoded)
         }
     }
 
-    /// Synchronous accessor for the cached entitlement set scoped
-    /// to a particular customer. Returns `nil` if no snapshot is
-    /// stored, OR if the stored snapshot is for a DIFFERENT
-    /// customer (which would mean we have stale data from a prior
-    /// user). Callers should treat nil as "not yet known" — never
-    /// as "definitely false".
-    public func entitlements(for customerId: String) -> Set<String>? {
-        guard let current, current.customerId == customerId else { return nil }
-        return current.entitlements
+    // MARK: - Sync reads
+
+    /// Nonisolated sync check. True iff the cache has an active
+    /// entitlement for this key AND its `validUntil` (if set)
+    /// hasn't passed. Returns false for an unknown key, an expired
+    /// key, or when the cache belongs to a different customer.
+    public nonisolated func isEntitledSync(
+        _ key: String,
+        for developerUserId: String
+    ) -> Bool {
+        guard let snap = syncBox.read(), snap.developerUserId == developerUserId else {
+            return false
+        }
+        guard let ent = snap.entitlements.first(where: { $0.key == key }) else {
+            return false
+        }
+        if !ent.isActive { return false }
+        if let until = ent.validUntil {
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            if nowMs > until { return false }
+        }
+        return true
     }
 
-    /// Synchronous quick check. Same caveats as `entitlements(for:)`:
-    /// returns false if no cache exists or it belongs to a different
-    /// customer.
-    public func isEntitled(_ key: String, for customerId: String) -> Bool {
-        guard let set = entitlements(for: customerId) else { return false }
-        return set.contains(key)
+    /// Nonisolated sync read of the full entitlement list for this
+    /// customer. Returns nil if no snapshot exists or it belongs to
+    /// a different customer. Filters out expired entries.
+    public nonisolated func entitlementsSync(
+        for developerUserId: String
+    ) -> [PublicEntitlement]? {
+        guard let snap = syncBox.read(), snap.developerUserId == developerUserId else {
+            return nil
+        }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        return snap.entitlements.filter { ent in
+            if !ent.isActive { return false }
+            if let until = ent.validUntil, nowMs > until { return false }
+            return true
+        }
     }
 
-    /// Replace the cached snapshot. Notifies subscribers if the new
-    /// value differs from the old. Persists to storage.
+    /// Freshness diagnostic — exposed via `Crossdeck.diagnostics()`.
+    /// Returns nil when no cache exists.
+    public nonisolated func freshness() -> (
+        lastUpdated: Int64,
+        isStale: Bool,
+        lastRefreshFailedAt: Int64?
+    )? {
+        guard let snap = syncBox.read() else { return nil }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let ageMs = nowMs - snap.lastUpdated
+        return (snap.lastUpdated, ageMs > staleAfterMs, snap.lastRefreshFailedAt)
+    }
+
+    // MARK: - Mutations
+
+    /// Replace the cached snapshot with a fresh fetch. Persists to
+    /// storage, updates sync mirror, notifies subscribers.
     public func write(_ snapshot: EntitlementSnapshot) {
         let changed = (current != snapshot)
         current = snapshot
+        syncBox.write(snapshot)
 
         if let data = try? JSONEncoder().encode(snapshot),
            let blob = String(data: data, encoding: .utf8) {
@@ -83,25 +185,64 @@ public actor EntitlementCache {
         }
     }
 
+    /// Update the in-place snapshot to record a failed refresh
+    /// attempt WITHOUT invalidating the cache. Bank-grade rule:
+    /// a Crossdeck outage MUST NOT fail a paying customer down to
+    /// free. Only a successful refresh can replace the entitlement
+    /// set. Records the failure timestamp so UI can render a
+    /// "last-checked at" badge.
+    public func markRefreshFailed() {
+        guard let existing = current else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let updated = EntitlementSnapshot(
+            developerUserId: existing.developerUserId,
+            entitlements: existing.entitlements,
+            lastUpdated: existing.lastUpdated,
+            lastRefreshFailedAt: nowMs
+        )
+        current = updated
+        syncBox.write(updated)
+        if let data = try? JSONEncoder().encode(updated),
+           let blob = String(data: data, encoding: .utf8) {
+            storage.setString(blob, forKey: storageKey)
+        }
+    }
+
     /// Wipe the cache. Called from `reset()` and from `identify(...)`
-    /// when the new customerId differs from the old (so the old
-    /// user's entitlements never leak across an account switch).
+    /// whenever a new customerId arrives (so the old user's
+    /// entitlements never leak across an account switch).
     public func clear() {
-        guard current != nil else { return }
+        guard current != nil else {
+            syncBox.write(nil)
+            return
+        }
         current = nil
+        syncBox.write(nil)
         storage.remove(storageKey)
         notifyAll()
     }
 
-    /// Subscribe to changes. Returns a cancellation token; capture
-    /// it in your view model and call `unsubscribe(_:)` to detach.
+    /// Nonisolated sync clear — used by `Crossdeck.identify(...)` to
+    /// wipe the cache atomically with the customerId swap.
+    public nonisolated func clearSync() {
+        syncBox.write(nil)
+        storage.remove(storageKey)
+        Task { await self.reconcileClearFromSync() }
+    }
+
+    private func reconcileClearFromSync() {
+        guard current != nil else { return }
+        current = nil
+        notifyAll()
+    }
+
+    /// Subscribe to changes. Returns a cancellation token.
+    /// Does NOT fire on subscribe (matches Web/Node/RN — read the
+    /// current value via `Crossdeck.entitlementsForCurrentCustomer()`
+    /// for the initial render).
     public func subscribe(_ handler: @escaping EntitlementSubscriber) -> UUID {
         let token = UUID()
         subscribers[token] = handler
-        // Fire once on subscription so the consumer doesn't have to
-        // independently read the current state.
-        let snapshot = current
-        Task.detached { handler(snapshot) }
         return token
     }
 
