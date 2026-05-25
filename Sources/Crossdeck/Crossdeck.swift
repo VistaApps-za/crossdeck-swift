@@ -45,6 +45,14 @@ import Foundation
 import UIKit
 #endif
 
+#if canImport(AppKit)
+import AppKit
+#endif
+
+#if canImport(WatchKit) && os(watchOS)
+import WatchKit
+#endif
+
 /// Environment declaration — must match the `publicKey` prefix.
 /// Mismatch is rejected at `Crossdeck.start(...)` so a typo'd key
 /// can't silently route production telemetry into sandbox
@@ -125,6 +133,43 @@ public struct CrossdeckOptions: Sendable {
     /// Apple unified logging during development.
     public var debugLogger: DebugLogger
 
+    /// Auto-tracking configuration. Default-everything-on — sessions,
+    /// screen views via `page.viewed`, tap autocapture via
+    /// `element.clicked`. Pass `.off` for strict-consent flows where
+    /// the SDK must emit zero events before user opt-in.
+    ///
+    /// Cross-platform contract: same event names as the Web/Node/RN
+    /// SDKs — `session.started`, `session.ended`, `page.viewed`,
+    /// `element.clicked` — so a single dashboard query for any of
+    /// these names returns Web + iOS + Android rows uniformly. The
+    /// `platform` property (added automatically on every event by
+    /// the device-info enricher) discriminates when needed.
+    public var autoTrack: AutoTrackConfig
+
+    /// MetricKit-backed performance monitoring. Off by default
+    /// because the daily payload can be large and not every customer
+    /// wants the perf signal. Set to true to receive `perf.metrics`,
+    /// `perf.hang`, `perf.cpu_exception`, `perf.disk_write_exception`,
+    /// and `perf.crash_diagnostic` events. iOS 14+ only.
+    public var enablePerformanceMonitoring: Bool
+
+    /// Listen on `Transaction.updates` (StoreKit 2) automatically.
+    /// When true, every signed transaction the system delivers
+    /// (purchase, restore, renewal, refund, family-shared) flows
+    /// to `/purchases/sync` AND fires a `purchase.completed` /
+    /// `purchase.refunded` event. Off by default because most apps
+    /// already invoke syncPurchases() from their own confirmation
+    /// flow and don't want duplicate work. iOS 15+ only.
+    public var automaticPurchaseTracking: Bool
+
+    /// Proactively flush the event queue whenever network
+    /// reachability transitions from offline → online (NWPathMonitor).
+    /// Default ON because the latency improvement on intermittent
+    /// connections (subway, airplane mode toggle) is large and the
+    /// monitor has near-zero overhead. Set to false to rely solely
+    /// on the existing 5-second flush timer. iOS 12+ / macOS 10.14+.
+    public var enableReachabilityFlush: Bool
+
     public init(
         appId: String,
         publicKey: String,
@@ -139,7 +184,11 @@ public struct CrossdeckOptions: Sendable {
         captureUncaughtExceptions: Bool = false,
         beforeSendError: BeforeSendErrorHandler? = nil,
         onPermanentFailure: PermanentFailureHandler? = nil,
-        debugLogger: @escaping DebugLogger = noopDebugLogger
+        debugLogger: @escaping DebugLogger = noopDebugLogger,
+        autoTrack: AutoTrackConfig = .default,
+        enablePerformanceMonitoring: Bool = false,
+        automaticPurchaseTracking: Bool = false,
+        enableReachabilityFlush: Bool = true
     ) {
         self.appId = appId
         self.publicKey = publicKey
@@ -155,6 +204,10 @@ public struct CrossdeckOptions: Sendable {
         self.beforeSendError = beforeSendError
         self.onPermanentFailure = onPermanentFailure
         self.debugLogger = debugLogger
+        self.autoTrack = autoTrack
+        self.enablePerformanceMonitoring = enablePerformanceMonitoring
+        self.automaticPurchaseTracking = automaticPurchaseTracking
+        self.enableReachabilityFlush = enableReachabilityFlush
     }
 
     /// Effective base URL — `baseUrl` if set, else the production
@@ -198,6 +251,26 @@ public final class Crossdeck: @unchecked Sendable {
 
     private var started: Bool = true
     private let startedLock = NSLock()
+
+    /// AutoTracker unregister handle — call from stop() to drop
+    /// this instance's auto-track listener. The singleton's
+    /// observers + swizzles stay installed (un-swizzling is
+    /// race-prone), but no more events flow to this client.
+    private var autoTrackUnregister: (() -> Void)?
+
+    /// Reachability monitor — fires queue.flush() on offline→online
+    /// transitions. nil when `enableReachabilityFlush` is false or
+    /// the OS target is below the NWPathMonitor floor.
+    private var reachability: Any?
+
+    /// MetricKit subscriber — nil when `enablePerformanceMonitoring`
+    /// is false or the OS target is below the MetricKit floor.
+    private var performanceVitals: Any?
+
+    /// StoreKit 2 Transaction.updates consumer — nil when
+    /// `automaticPurchaseTracking` is false or the OS target is
+    /// below iOS 15.
+    private var purchaseAutoTrack: Any?
 
     // Process-singleton accessor — exposes the most-recently-started
     // client so services / view models / non-SwiftUI surfaces can
@@ -363,6 +436,92 @@ public final class Crossdeck: @unchecked Sendable {
         // `captureUncaughtExceptions: false` AND we're in a test
         // build via the urlSession injection (URLProtocol stub).
         Task { _ = await self.heartbeat() }
+
+        // ---- Auto-tracking & ambient signal modules ----
+        //
+        // These run in the SAME process-singleton fashion the
+        // Web/Node/RN SDKs do — sessions, screen views, taps, perf
+        // vitals, network-edge flush, and StoreKit transactions all
+        // flow into the same track() pipeline as developer-fired
+        // events. Each module is independently opt-out via
+        // `CrossdeckOptions` flags.
+
+        // 1. AutoTracker — sessions / screens / taps. Multicast
+        //    registration so multiple Crossdeck instances (test
+        //    harnesses, hot-reload) share the global swizzles.
+        let weakSelf: @Sendable (String, [String: Any]) -> Void = { [weak self] name, props in
+            self?.track(name, properties: props)
+        }
+        autoTrackUnregister = AutoTracker.shared.register(
+            config: options.autoTrack,
+            emit: weakSelf
+        )
+
+        // 2. Reachability — flush on offline→online edge.
+        if options.enableReachabilityFlush {
+            if #available(iOS 12.0, macOS 10.14, tvOS 12.0, watchOS 5.0, *) {
+                let queueRef = queue
+                let reach = Reachability(onReachable: {
+                    Task { await queueRef.flush() }
+                })
+                reach.start()
+                self.reachability = reach
+            }
+        }
+
+        // 3. MetricKit perf vitals — daily aggregates + near-real-
+        //    time diagnostics.
+        #if canImport(MetricKit) && !os(watchOS) && !os(tvOS)
+        if options.enablePerformanceMonitoring {
+            if #available(iOS 14.0, macOS 12.0, *) {
+                let perf = PerformanceVitals(emit: weakSelf)
+                perf.start()
+                self.performanceVitals = perf
+            }
+        }
+        #endif
+
+        // 4. StoreKit 2 Transaction.updates auto-listener.
+        #if canImport(StoreKit) && os(iOS)
+        if options.automaticPurchaseTracking {
+            if #available(iOS 15.0, *) {
+                let httpRef = http
+                let debugLogger = options.debugLogger
+                let purchaseTracker = PurchaseAutoTrack(
+                    emitTrack: weakSelf,
+                    syncBackend: { jws, originalTransactionId in
+                        // Same backend endpoint syncPurchases() uses
+                        // — single contract surface. Build the same
+                        // PurchaseSyncRequest payload so server-side
+                        // parsing is identical between manual and
+                        // automatic paths.
+                        let body = PurchaseSyncRequest(
+                            rail: "apple",
+                            signedTransactionInfo: jws,
+                            signedRenewalInfo: nil,
+                            appAccountToken: originalTransactionId
+                        )
+                        guard let bodyData = try? JSONEncoder().encode(body) else { return }
+                        let outcome = await httpRef.request(
+                            method: "POST",
+                            path: "/purchases/sync",
+                            body: bodyData,
+                            idempotencyKey: "auto_purch_" + UUID().uuidString
+                                .lowercased()
+                                .replacingOccurrences(of: "-", with: "")
+                        )
+                        if outcome.kind != .success {
+                            debugLogger(.sdkConfigured, [
+                                "auto_purchase_sync_failed": String(describing: outcome.error),
+                            ])
+                        }
+                    }
+                )
+                purchaseTracker.start()
+                self.purchaseAutoTrack = purchaseTracker
+            }
+        }
+        #endif
     }
 
     // MARK: - Public API
@@ -445,6 +604,12 @@ public final class Crossdeck: @unchecked Sendable {
         let scrub = consentSnapshot.scrub
         let identitySnapshot = identity.snapshotSync()
         let superPropsSnapshot = superProperties.snapshotSync()
+        // Capture sessionId from the AutoTracker so every event
+        // tracks its session anchor — same enrichment Web SDK does
+        // via `state.autoTracker.currentSessionId`. Empty when
+        // sessions auto-track is off; consumers can still
+        // hand-supply via super-properties.
+        let sessionId = AutoTracker.shared.currentSessionId()
 
         // Convert caller-supplied properties to Sendable AnyCodable
         // immediately so the Task closure captures only Sendable
@@ -465,6 +630,12 @@ public final class Crossdeck: @unchecked Sendable {
             for (k, v) in superPropsSnapshot { merged[k] = v }
             for (k, v) in devicePayload { merged[k] = v }
             for (k, v) in codedSnapshot { merged[k] = v.value }
+            // Add sessionId LAST so the auto-track anchor wins over
+            // any caller-supplied "sessionId" key. Skip when no
+            // session is active (rare — only happens between
+            // background-end and next-foreground or when sessions
+            // auto-track is disabled).
+            if let sessionId { merged["sessionId"] = sessionId }
 
             let final = scrub ? (scrubPIIDeep(merged) as? [String: Any]) ?? merged : merged
             var coded: [String: AnyCodable] = [:]
@@ -1119,6 +1290,38 @@ public final class Crossdeck: @unchecked Sendable {
         defer { startedLock.unlock() }
         started = false
         options.debugLogger(.sdkConfigured, [:])
+
+        // Tear down auto-track listener + ambient signal modules.
+        // The AutoTracker singleton's global swizzles + lifecycle
+        // observers STAY installed (un-swizzling is race-prone and
+        // re-installing on a new start() would lose the dispatch-
+        // once guarantee). But our emit closure unregisters so no
+        // more events flow to THIS client.
+        autoTrackUnregister?()
+        autoTrackUnregister = nil
+
+        if #available(iOS 12.0, macOS 10.14, tvOS 12.0, watchOS 5.0, *),
+           let reach = reachability as? Reachability {
+            reach.stop()
+        }
+        reachability = nil
+
+        #if canImport(MetricKit) && !os(watchOS) && !os(tvOS)
+        if #available(iOS 14.0, macOS 12.0, *),
+           let perf = performanceVitals as? PerformanceVitals {
+            perf.stop()
+        }
+        #endif
+        performanceVitals = nil
+
+        #if canImport(StoreKit) && os(iOS)
+        if #available(iOS 15.0, *),
+           let tracker = purchaseAutoTrack as? PurchaseAutoTrack {
+            tracker.stop()
+        }
+        #endif
+        purchaseAutoTrack = nil
+
         // Best-effort: persist anything in flight before relinquishing.
         Task { await queue.persistAll() }
         // Clear the process-singleton iff THIS instance is the one
@@ -1270,8 +1473,9 @@ public final class Crossdeck: @unchecked Sendable {
     }
 
     private func installLifecycleObservers() {
-        #if canImport(UIKit)
         let center = NotificationCenter.default
+
+        #if canImport(UIKit) && !os(watchOS)
         center.addObserver(
             forName: UIApplication.willResignActiveNotification,
             object: nil,
@@ -1288,6 +1492,61 @@ public final class Crossdeck: @unchecked Sendable {
             guard let self else { return }
             // Best-effort flush before suspension. iOS gives a few
             // seconds of background time — enough to ship a small batch.
+            Task { await self.queue.flush() }
+        }
+        // willTerminate fires on user force-quit from the app switcher.
+        // Without this observer, up to one batch of queued events
+        // is lost. Sync persist (vs flush) is the contract here —
+        // we want the events on disk before the process dies; the
+        // next launch's queue rehydration ships them.
+        center.addObserver(
+            forName: UIApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.queue.persistAll() }
+        }
+        #elseif canImport(AppKit)
+        // Pure AppKit Mac apps land here (Mac Catalyst lands in
+        // the UIKit branch above). Cover Cmd+Q + Cmd+H + system
+        // shutdown so a Mac customer's queued events don't vanish
+        // when the user closes the app.
+        center.addObserver(
+            forName: NSApplication.willResignActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.queue.persistAll() }
+        }
+        center.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.queue.persistAll() }
+        }
+        #elseif canImport(WatchKit) && os(watchOS)
+        // watchOS — extension-level lifecycle. WKExtension.shared
+        // emits applicationWillResignActive when the user lowers
+        // their wrist, applicationDidEnterBackground when the watch
+        // face takes over.
+        center.addObserver(
+            forName: WKExtension.applicationWillResignActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.queue.persistAll() }
+        }
+        center.addObserver(
+            forName: WKExtension.applicationDidEnterBackgroundNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
             Task { await self.queue.flush() }
         }
         #endif

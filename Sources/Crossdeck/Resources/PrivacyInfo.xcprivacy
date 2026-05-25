@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Crossdeck — Apple App Store privacy manifest.
+
+  Required as of May 2024 (PrivacyInfo.xcprivacy mandate). Consumer
+  apps that embed this SDK without a corresponding manifest are
+  rejected at App Store Connect submit. By bundling the manifest at
+  the SDK level, every Crossdeck customer's app inherits the correct
+  required-reason declarations automatically — no copy-paste, no
+  one-off rejections.
+
+  See Apple's required-reason API list:
+  https://developer.apple.com/documentation/bundleresources/privacy_manifest_files/describing_use_of_required_reason_api
+
+  What this SDK accesses (and the reason code we declare):
+
+    * UserDefaults  — CA92.1: "Access info from same app, per
+      documentation". The SDK persists anonymousId, queued events,
+      super-properties, and the entitlement cache to UserDefaults.
+      All reads/writes scoped to keys our own SDK wrote.
+
+    * systemBootTime — 35F9.1: "Access info from same app, per
+      documentation". DeviceInfo.swift may inspect ProcessInfo.systemUptime
+      indirectly via OS APIs; declared defensively.
+
+  What this SDK does NOT do (and so does not declare):
+
+    * No tracking domains (NSPrivacyTracking = false). The SDK does
+      not link a user identity to data collected by third parties.
+      developerUserId is supplied by the consumer's auth provider
+      and never leaves the consumer's own data plane.
+
+    * No tracked data types beyond what the consumer chooses to
+      track() — and the consumer's own app manifest declares those.
+      Crossdeck does not auto-collect IDFA, contacts, photos, etc.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

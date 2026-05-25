@@ -39,6 +39,17 @@ let package = Package(
             name: "Crossdeck",
             dependencies: [],
             path: "Sources/Crossdeck",
+            resources: [
+                // PrivacyInfo.xcprivacy MUST ship inside the SDK
+                // bundle so every consumer app inherits the
+                // required-reason API declarations Apple began
+                // enforcing in May 2024. Without this file, every
+                // app embedding Crossdeck is rejected at App Store
+                // Connect submit with "Missing required reasons".
+                // .copy preserves the file verbatim — SPM does NOT
+                // re-process it, which is what Apple expects.
+                .copy("Resources/PrivacyInfo.xcprivacy"),
+            ],
             swiftSettings: [
                 // Strict concurrency catches data races at compile
                 // time. The SDK touches mutable state across actors

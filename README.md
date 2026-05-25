@@ -2,16 +2,18 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.1.0 — bank-grade.** Modeled line-for-line on the
-> Web/Node/React Native SDKs. All three pillars (analytics events,
-> error capture, entitlement gating) live in one Swift Package
-> with zero runtime dependencies. v1.1.0 makes `track`, `identify`,
-> and `reset` non-throwing — no more `try?` at every call site,
-> aligning with Apple's first-party SDKs and the iOS analytics
-> ecosystem. v1.0.3 fixed the iOS 13 compile error in
-> `defaultDebugLogger()`. v1.0.2 added `Crossdeck.current` for
-> service-layer access. See [`CHANGELOG.md`](./CHANGELOG.md) for
-> the full migration notes.
+> **Status: v1.2.0 — full bank-grade parity.** Modeled line-for-line
+> on the Web/Node/React Native SDKs. v1.2.0 adds **auto-tracking**
+> (sessions, screen views, tap autocapture) so journeys appear in
+> your dashboard with zero instrumentation, **PrivacyInfo.xcprivacy**
+> bundled in the SDK (Apple requires this since May 2024 — without
+> it your app is rejected at submit), **MetricKit perf vitals**
+> (hang detection, cold launch time, CPU exceptions), **network-
+> edge flush** for offline→online recovery, **automatic StoreKit 2
+> transaction observation**, and **deep-link / push attribution
+> helpers**. v1.2.0 made `track`, `identify`, `reset` non-throwing.
+> See [`CHANGELOG.md`](./CHANGELOG.md) for full details and a
+> compatibility table.
 
 ## Three pillars
 
@@ -20,6 +22,57 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 | **Events** | Durable, deduplicated, batched event ingest. Survives crashes / offline / process suspension. | Your funnels, cohorts, and revenue analytics rest on this never losing or double-counting an event. |
 | **Errors** | Uncaught `NSException` capture, manual `captureError(...)`, stack normalisation, breadcrumbs, beforeSend hook. | When something breaks in prod, you get the actual stack + the user's last 50 actions, not "TypeError: undefined". |
 | **Entitlements** | Synchronous read of "is this customer entitled to feature X?" with on-device cache and async refresh. | Paywall gates without a network round-trip. |
+
+## Auto-tracking (v1.2.0+)
+
+The SDK ships with **default-on auto-tracking** — your dashboard
+sees user journeys without any `track(...)` calls in your code.
+Event names match the Web/Node/RN SDKs so cross-platform funnels
+work with a single query:
+
+| Event | Fires when | Properties |
+| ----- | ---------- | ---------- |
+| `session.started` | First `start()` of the process, or foreground after >30 min idle. | `sessionId`, `reason` |
+| `session.ended` | App enters background, terminates, or session manually reset. | `sessionId`, `durationMs`, `reason` |
+| `page.viewed` | Any `UIViewController.viewDidAppear` (including SwiftUI's `NavigationStack` host controllers). | `screen` (class name), `title`, `restorationId` |
+| `element.clicked` | Any UIControl action (UIButton, UISwitch, UISlider, UISegmentedControl) AND any SwiftUI button tap that resolves to an accessibility-labelled view. | `element`, `accessibilityLabel`, `accessibilityId`, `title`, `viewportX`, `viewportY` |
+
+Every event the SDK ships — auto-track and your own `track(...)` calls
+— carries `sessionId` so funnels reconstruct cleanly.
+
+**Privacy guardrails baked in:**
+
+- Secure text fields (`isSecureTextEntry`) and accessibility labels
+  matching `password` / `card` / `ssn` / `credit` / `cvv` / `pin` are
+  skipped silently — no opt-in needed, no PII leaves the device.
+- Per-element opt-out via the standard accessibility identifier
+  convention: set `view.accessibilityIdentifier = "cd-noTrack"` (or
+  include the substring) and Crossdeck skips it.
+
+**Configure** via `CrossdeckOptions.autoTrack`:
+
+```swift
+// Disable tap autocapture but keep sessions + screens
+let options = CrossdeckOptions(
+    appId: "app_ios_xxx",
+    publicKey: "cd_pub_live_…",
+    environment: .production,
+    autoTrack: AutoTrackConfig(
+        sessions: true,
+        screenViews: true,
+        taps: false,
+        sessionResumeThresholdSeconds: 30 * 60
+    )
+)
+
+// Or disable everything (strict-consent flow)
+let strict = CrossdeckOptions(
+    appId: "app_ios_xxx",
+    publicKey: "cd_pub_live_…",
+    environment: .production,
+    autoTrack: .off
+)
+```
 
 ## Install
 
@@ -32,7 +85,7 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
    https://github.com/VistaApps-za/crossdeck-swift.git
    ```
 
-3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.1.0`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
+3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.2.0`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
 4. Click **Add Package**. Xcode resolves the package and offers to add the `Crossdeck` library product to your app target — accept.
 
 > **If your Xcode UI already shows `Dependency Rule: Branch — main` from a pre-v1.0.0 add**, the *File → Add Package Dependencies…* dialog is hard-blocked from changing rules on already-added packages — the Dependency Rule dropdown greys out with "already depends on … with rule main" at the bottom. Removing and re-adding usually loops, too: Xcode's *Recently Used* auto-suggests the package back in with the dropdown still greyed.
@@ -43,11 +96,11 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 > 2. In the editor pane, select your project under the **PROJECT** column — **not** under TARGETS (the rule editor only lives on the project, not the target).
 > 3. Click the **Package Dependencies** tab.
 > 4. **Double-click** the `crossdeck-swift` row. A sheet opens with the Dependency Rule editor — this is the only UI in Xcode that can change a rule on an already-added package.
-> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.1.0`, click `Done`.
+> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.2.0`, click `Done`.
 >
 > If double-click doesn't open the sheet, try right-click → *Modify Package Settings* (label varies by Xcode version).
 >
-> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.1.0; }`, save, reopen.
+> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.2.0; }`, save, reopen.
 
 ### Package.swift
 
@@ -55,12 +108,12 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 dependencies: [
     .package(
         url: "https://github.com/VistaApps-za/crossdeck-swift.git",
-        from: "1.1.0"
+        from: "1.2.0"
     ),
 ]
 ```
 
-`from: "1.1.0"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
+`from: "1.2.0"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
 
 ## Quickstart
 
@@ -111,12 +164,12 @@ struct YourApp: App {
 Then anywhere in your app. Inside SwiftUI views use `@Environment(\.crossdeck)`; from services / view models / non-SwiftUI surfaces use the **`Crossdeck.current`** static accessor (v1.0.2+):
 
 ```swift
-// Track an event — fire-and-forget, never throws (v1.1.0+).
+// Track an event — fire-and-forget, never throws (v1.2.0+).
 cd?.track("paywall_seen", properties: ["variant": "annual"])
 
 // Identify after sign-in. userId is YOUR auth provider's stable id
 // (Firebase Auth uid, Sign In with Apple userIdentifier, Auth0 sub,
-// Supabase id, etc.) — never a placeholder. Non-throwing in v1.1.0+.
+// Supabase id, etc.) — never a placeholder. Non-throwing in v1.2.0+.
 cd?.identify(userId: user.id, email: user.email, traits: ["plan": "pro"])
 
 // Sign-out — wipes identity + entitlement cache + super-properties +
@@ -212,7 +265,7 @@ The package is in your Package Dependencies but the library product isn't linked
 
 ### `'Logger' is only available in iOS 14.0 or newer` (and similar)
 
-You're on Crossdeck v1.0.0–v1.0.2 with a deployment target below iOS 14. Upgrade to **v1.1.0** — `defaultDebugLogger()` is now availability-gated and falls back to `os_log` on iOS 13. **File → Packages → Update To Latest Package Versions** pulls v1.1.0 if your rule is *Up to Next Major Version*.
+You're on Crossdeck v1.0.0–v1.0.2 with a deployment target below iOS 14. Upgrade to **v1.2.0** — `defaultDebugLogger()` is now availability-gated and falls back to `os_log` on iOS 13. **File → Packages → Update To Latest Package Versions** pulls v1.2.0 if your rule is *Up to Next Major Version*.
 
 ### `Branch: main` rule won't change
 

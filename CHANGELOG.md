@@ -4,6 +4,157 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-05-25
+
+Full bank-grade parity with the Web/Node/RN SDKs. v1.1.0 closed the
+ergonomics gap (non-throwing track/identify/reset); v1.2.0 closes
+every remaining gap that a serious customer would notice — auto-
+tracking, performance vitals, mobile lifecycle, App Store privacy
+manifest, and ambient signal modules.
+
+### Added — Auto-tracking (sessions + screens + taps)
+
+Cross-platform event vocabulary identical to Web SDK so a single
+dashboard query returns Web + iOS + Android rows uniformly:
+
+- `session.started` / `session.ended` with `sessionId` + `durationMs`.
+  30-minute idle threshold matches GA4 / Mixpanel / Web SDK
+  convention — a quick app-switch keeps the same session.
+- `page.viewed` — fires automatically on every `UIViewController.viewDidAppear`
+  via method swizzling. Skips framework hosts (UINavigationController,
+  UIHostingController, _SwiftUI types). 250ms dedup window collapses
+  push/pop animation double-fires.
+- `element.clicked` — fires on every UIControl action (UIButton,
+  UISwitch, UISlider, UISegmentedControl) AND on SwiftUI button taps
+  via UIWindow.sendEvent capture. Captures accessibilityLabel,
+  accessibilityIdentifier, class name, viewport coordinates.
+
+Every event is enriched with the current `sessionId` so funnels work
+without explicit instrumentation.
+
+Privacy guardrails baked in:
+- Secure text fields, accessibility labels containing `password` /
+  `card` / `ssn` / `credit` / `cvv` / `pin` are skipped silently.
+- Opt-out per element via `accessibilityIdentifier` containing
+  `cd-noTrack` — Mixpanel-style convention familiar to iOS devs.
+- 100ms tap-coalesce defeats React-Native-style double-fires.
+
+Configurable via `CrossdeckOptions(autoTrack: .off)` for strict-
+consent flows, or feature-grained:
+
+```swift
+CrossdeckOptions(
+    autoTrack: AutoTrackConfig(
+        sessions: true,
+        screenViews: true,
+        taps: false,  // disable tap autocapture only
+        sessionResumeThresholdSeconds: 30 * 60
+    )
+)
+```
+
+### Added — PrivacyInfo.xcprivacy bundled in the SDK
+
+Apple began enforcing the required-reason API manifest at App Store
+Connect submit in May 2024. Without one, every embedding app is
+rejected. Crossdeck now ships its own `PrivacyInfo.xcprivacy`
+declaring:
+- `NSPrivacyAccessedAPICategoryUserDefaults` reason `CA92.1`
+- `NSPrivacyAccessedAPICategorySystemBootTime` reason `35F9.1`
+- `NSPrivacyTracking: false` (we do not link identity across third
+  parties)
+
+Consumer apps inherit the manifest automatically via SPM's resource
+copy — no copy-paste, no one-off rejections.
+
+### Added — MetricKit performance vitals (opt-in)
+
+Mirrors Web SDK's `web-vitals.ts`. Set
+`CrossdeckOptions(enablePerformanceMonitoring: true)` to receive:
+- `perf.metrics` — daily aggregate (cold launch samples, resume
+  samples, hang samples, peak memory, cumulative CPU).
+- `perf.hang` — near-real-time UI-blocked diagnostics with
+  hangDuration + metadata.
+- `perf.cpu_exception` — sustained CPU spike diagnostics.
+- `perf.disk_write_exception` — high-volume disk write diagnostics.
+- `perf.crash_diagnostic` — MetricKit's process-fatal exception
+  pipeline (complement to `NSSetUncaughtExceptionHandler`).
+
+iOS 14+ / macOS 12+. Off by default — payload size is meaningful and
+not every customer wants the signal.
+
+### Added — Proactive network-edge flush
+
+`NWPathMonitor` watches reachability. On `offline → online`
+transitions, the event queue flushes immediately instead of waiting
+for the next 5-second timer. Closes the latency gap on intermittent
+connections (subway, airplane mode toggle).
+
+ON by default via `CrossdeckOptions(enableReachabilityFlush: true)`.
+iOS 12+ / macOS 10.14+.
+
+### Added — Automatic StoreKit 2 purchase tracking (opt-in)
+
+`CrossdeckOptions(automaticPurchaseTracking: true)` installs a
+`Transaction.updates` AsyncSequence consumer. Every signed
+transaction (purchase, restore, renewal, refund, family-shared)
+flows to `/purchases/sync` via the same HTTP path `syncPurchases()`
+uses AND fires a public funnel event:
+- `purchase.completed` for new transactions
+- `purchase.refunded` for revoked transactions (carries
+  revocationReason)
+- `purchase.unverified` for transactions Apple's signature check
+  fails — fraud-signal candidate, never synced to backend
+
+iOS 15+. Off by default because most apps already invoke
+`syncPurchases()` from their own confirmation flow.
+
+### Added — Deep-link + push interaction tracking helpers
+
+Public API surface for the consumer to forward intent from their
+SceneDelegate / UNUserNotificationCenter:
+- `cd.trackDeepLink(url:source:)` — extracts UTM + click-id query
+  parameters (gclid, fbclid, msclkid, ttclid, li_fat_id, twclid)
+  as top-level properties. Fires `deeplink.opened`.
+- `cd.trackPushReceived(userInfo:)` / `trackPushInteraction(userInfo:actionIdentifier:)`
+  — surfaces marketing-platform IDs (campaign_id, message_id, etc.)
+  without logging the alert body. Fires `push.received` /
+  `push.interacted`.
+
+### Fixed — `willTerminate` flush observer
+
+Force-quit from the app switcher previously lost up to one batch
+of queued events. v1.2.0 observes `UIApplication.willTerminateNotification`
+and runs `queue.persistAll()` so the events land on disk before
+the process dies. Next launch's queue rehydration ships them.
+
+### Fixed — macOS / watchOS lifecycle parity
+
+`Cmd+Q` on a Mac Catalyst or pure-AppKit Crossdeck client previously
+fell off the lifecycle hook (only UIKit was wired). v1.2.0 adds
+`NSApplication.willTerminateNotification` + `WKExtension.applicationDidEnterBackgroundNotification`
+branches so every Apple OS the SDK targets has a persist-on-suspend
+guarantee.
+
+### Migration
+
+None required. All new modules are additive or default-OFF where
+they could be surprising. v1.1.0 call sites compile clean against
+v1.2.0.
+
+To benefit from auto-tracking, no code change — start using the
+defaults. Customers who want to disable a specific signal:
+
+```swift
+CrossdeckOptions(
+    // …
+    autoTrack: AutoTrackConfig(taps: false),
+    enableReachabilityFlush: false,
+    enablePerformanceMonitoring: false,    // already default
+    automaticPurchaseTracking: false        // already default
+)
+```
+
 ## [1.1.0] — 2026-05-25
 
 Fire-and-forget API ergonomics — matches Mixpanel / Amplitude /
