@@ -4,6 +4,73 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-05-25
+
+Fire-and-forget API ergonomics — matches Mixpanel / Amplitude /
+Sentry / Firebase Analytics iOS conventions. Dogfood feedback flagged
+that requiring `try?` at every analytics call site is hostile in
+Swift even though Web/Node/RN's `track()` throw — Swift's
+compile-time enforcement makes the same shape user-hostile.
+
+### Changed — `track`, `identify`, `reset` no longer throw
+
+The three most-called methods now have non-throwing signatures.
+Validation intent is unchanged; only the Swift-side signalling
+mechanism is now idiomatic.
+
+```diff
+- try? cd?.track("paywall_seen")            // v1.0.x — Swift required try?
++ cd?.track("paywall_seen")                 // v1.1.0 — clean call site
+
+- try? cd?.identify(userId: "user_123")     // v1.0.x
++ cd?.identify(userId: "user_123")          // v1.1.0
+
+- try? cd?.reset()                          // v1.0.x
++ cd?.reset()                               // v1.1.0
+```
+
+Validation failures (empty event name, empty userId, called after
+`stop()`) now:
+- Log a warning via `debugLogger` with a `*_dropped` key naming
+  the failure code.
+- Trigger `assertionFailure` in Debug builds — loud during dev,
+  silent no-op in Release. Aligns with Apple's first-party SDK
+  conventions (UserDefaults, URLSession, OSLog: none throw on
+  invalid arguments).
+- Skip the actual work — the call becomes a no-op.
+
+### Migration
+
+This is a soft break. All v1.0.x callers still compile:
+- `try? cd.track(...)` → compiles with a "no calls to throwing
+  functions" warning. Drop the `try?` to clean up.
+- `try cd.track(...)` inside a `do/catch` → compiles but the
+  catch becomes unreachable (warning). Drop both `try` and
+  the catch.
+- Plain `cd.track(...)` (the v1.1.0 idiom) → compiles clean.
+
+The non-throwing methods are:
+- `track(_:properties:)`
+- `identify(userId:email:traits:)`
+- `reset()`
+
+Still throwing (legitimate runtime failure modes):
+- `Crossdeck.start(options:)` — config validation
+- `identifyAndWait(userId:email:traits:)` — network round-trip + cdcust_ return
+- `forget()` — network round-trip
+- `getEntitlements()` — network round-trip
+- `syncPurchases(rail:...)` — network round-trip
+- `flush()`, `heartbeat()` — network round-trip
+
+### Cross-SDK consistency
+
+Web/Node/RN's `track()` keep their throwing signature because in
+JavaScript, an uncaught throw propagates to the global error handler
+without requiring `try`/`catch` at every call site. The platform
+contract is "track validates input and signals failure for empty
+name" — Swift's signalling is now language-idiomatic
+(`assertionFailure` + debug log) instead of `throws`.
+
 ## [1.0.3] — 2026-05-25
 
 Critical compile-fix release. v1.0.0–v1.0.2 declared `iOS(.v13)` in

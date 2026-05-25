@@ -367,14 +367,35 @@ public final class Crossdeck: @unchecked Sendable {
 
     // MARK: - Public API
 
-    public func track(_ name: String, properties: [String: Any]? = nil) throws {
-        try assertStarted()
+    /// Track a domain-specific event. Fire-and-forget; never throws.
+    ///
+    /// Validation behaviour:
+    ///   * Empty `name` is dropped with a debug log + an
+    ///     `assertionFailure` (loud in Debug builds, silent no-op
+    ///     in Release). Aligns with how Apple's first-party SDKs
+    ///     and every major analytics SDK (Mixpanel, Amplitude,
+    ///     Sentry, Firebase Analytics) shape their iOS surface —
+    ///     a typo'd event name should never propagate up the call
+    ///     stack and crash a customer's app.
+    ///   * Property values are sanitised in-place (NaN → null,
+    ///     strings > 1024 chars truncated, cyclic graphs replaced,
+    ///     etc.) with debug warnings. Never throws on a property.
+    ///   * Called after `stop()` → debug log + no-op.
+    ///
+    /// Cross-SDK contract: Web/Node/RN's `track()` throw in JavaScript
+    /// where uncaught throws propagate to the global error handler.
+    /// Swift's compile-time enforcement makes that pattern hostile —
+    /// every call site has to wrap in `try?`. The validation INTENT
+    /// is identical; only the signalling mechanism is Swift-idiomatic.
+    public func track(_ name: String, properties: [String: Any]? = nil) {
+        guard isStarted() else {
+            options.debugLogger(.sdkConfigured, ["track_dropped": "not_initialized", "event": name])
+            return
+        }
         guard !name.isEmpty else {
-            throw CrossdeckError(
-                type: .invalidRequest,
-                code: "missing_event_name",
-                message: "track(name) requires a non-empty name."
-            )
+            assertionFailure("[Crossdeck] track(name:) requires a non-empty name. Event dropped.")
+            options.debugLogger(.sdkConfigured, ["track_dropped": "missing_event_name"])
+            return
         }
         // Sanitise + warn (NEVER throws — matches Web/Node/RN
         // bank-grade contract that track() never fails on a single
@@ -494,18 +515,31 @@ public final class Crossdeck: @unchecked Sendable {
     ///
     /// Throws `CrossdeckError` if `userId` is empty or if any
     /// trait value isn't JSON-encodable.
+    /// Link the device to a stable user identity. Fire-and-forget;
+    /// never throws. Same Swift-idiomatic non-throwing shape as
+    /// `track()` — see that method's doc for the cross-SDK rationale.
+    ///
+    /// Validation behaviour:
+    ///   * Empty `userId` is dropped with a debug log + an
+    ///     `assertionFailure` (loud in Debug, silent in Release).
+    ///   * Trait values are sanitised; never throws on a trait.
+    ///   * Called after `stop()` → debug log + no-op.
+    ///
+    /// For the throwing variant that awaits the canonical
+    /// `crossdeckCustomerId`, see `identifyAndWait(...)`.
     public func identify(
         userId: String,
         email: String? = nil,
         traits: [String: Any]? = nil
-    ) throws {
-        try assertStarted()
+    ) {
+        guard isStarted() else {
+            options.debugLogger(.sdkConfigured, ["identify_dropped": "not_initialized"])
+            return
+        }
         guard !userId.isEmpty else {
-            throw CrossdeckError(
-                type: .invalidRequest,
-                code: "missing_user_id",
-                message: "identify(userId:) requires a non-empty userId."
-            )
+            assertionFailure("[Crossdeck] identify(userId:) requires a non-empty userId. Identify dropped.")
+            options.debugLogger(.sdkConfigured, ["identify_dropped": "missing_user_id"])
+            return
         }
         // Sanitise traits — non-encodable / oversize / cyclic values
         // are coerced or dropped (matches Web/Node/RN). Never throws.
@@ -619,7 +653,18 @@ public final class Crossdeck: @unchecked Sendable {
         email: String? = nil,
         traits: [String: Any]? = nil
     ) async throws -> AliasResult {
-        try identify(userId: userId, email: email, traits: traits)
+        try assertStarted()
+        guard !userId.isEmpty else {
+            throw CrossdeckError(
+                type: .invalidRequest,
+                code: "missing_user_id",
+                message: "identifyAndWait(userId:) requires a non-empty userId."
+            )
+        }
+        // Drive the sync side-effects (local identity set, entitlement
+        // cache clear, breadcrumb, background alias) through the same
+        // path as the non-throwing identify().
+        identify(userId: userId, email: email, traits: traits)
         let snapshot = identity.snapshotSync()
         // Re-sanitise traits for this call's wire body — the prior
         // identify() did the same on its own background Task; doing
@@ -897,8 +942,19 @@ public final class Crossdeck: @unchecked Sendable {
         return entitlementsForCurrentCustomer()?.map { $0.key }
     }
 
-    public func reset() throws {
-        try assertStarted()
+    /// Sign-out path. Wipes the local identity, entitlement cache,
+    /// super-properties, and breadcrumbs; regenerates the anonymous
+    /// ID so the next anonymous session is fully unlinked from the
+    /// prior identified user.
+    ///
+    /// Fire-and-forget; never throws. Same Swift-idiomatic shape as
+    /// `track()` and `identify()`. Called after `stop()` → debug log
+    /// + no-op.
+    public func reset() {
+        guard isStarted() else {
+            options.debugLogger(.sdkConfigured, ["reset_dropped": "not_initialized"])
+            return
+        }
         Task {
             await identity.reset()
             await entitlements.clear()
@@ -1046,6 +1102,16 @@ public final class Crossdeck: @unchecked Sendable {
                 message: "Crossdeck client was stopped — call Crossdeck.start(...) again."
             )
         }
+    }
+
+    /// Non-throwing variant of `assertStarted()` used by the fire-and-
+    /// forget public API (track / identify / reset). Returns false
+    /// after `stop()` so callers can early-return without inflicting
+    /// a thrown error on every call site.
+    private func isStarted() -> Bool {
+        startedLock.lock()
+        defer { startedLock.unlock() }
+        return started
     }
 
     public func stop() {
