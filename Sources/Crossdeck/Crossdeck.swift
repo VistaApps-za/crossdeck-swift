@@ -199,6 +199,22 @@ public final class Crossdeck: @unchecked Sendable {
     private var started: Bool = true
     private let startedLock = NSLock()
 
+    // Process-singleton accessor — exposes the most-recently-started
+    // client so services / view models / non-SwiftUI surfaces can
+    // reach the SDK without an explicit injection. SwiftUI views
+    // should still prefer @Environment(\.crossdeck) inside body { };
+    // DI users can keep injecting the instance explicitly. The
+    // accessor is thread-safe via `currentLock` and Optional-typed
+    // so the call-site idiom is the same `cd?.` propagation used in
+    // the Quickstart pattern.
+    //
+    // Bank-grade discipline: never falsely report a stopped client
+    // as current. `stop()` clears the slot iff the stopped instance
+    // is the one currently advertised — concurrent start+stop races
+    // on a SECOND client don't clobber the FIRST one's slot.
+    private static let currentLock = NSLock()
+    nonisolated(unsafe) private static var _current: Crossdeck?
+
     /// Runtime-mutable error capture context. Protected by
     /// `errorStateLock`. The ErrorCapture pipeline reads through
     /// these on every captured event so `setTag` / `setContext` /
@@ -252,7 +268,38 @@ public final class Crossdeck: @unchecked Sendable {
                 message: "Crossdeck.start requires a non-empty appId. Find yours in the Crossdeck dashboard."
             )
         }
-        return Crossdeck(options: options)
+        let instance = Crossdeck(options: options)
+        // Publish to the process-singleton accessor AFTER construction
+        // succeeds. `start()` only reaches this line after validation +
+        // sync init returned, so consumers reading `Crossdeck.current`
+        // from a different thread never observe a half-initialised
+        // instance.
+        currentLock.lock()
+        _current = instance
+        currentLock.unlock()
+        return instance
+    }
+
+    /// The most-recently-started Crossdeck instance — process-wide
+    /// singleton accessor.
+    ///
+    /// Use this from non-SwiftUI surfaces (services, view models,
+    /// AppDelegate methods, Combine pipelines, background workers)
+    /// where injecting the instance through `@Environment(\.crossdeck)`
+    /// isn't an option. Returns `nil` before `start(...)` has ever
+    /// succeeded in this process, or after the most-recently-started
+    /// client's `stop()` was called.
+    ///
+    /// Inside SwiftUI views, prefer `@Environment(\.crossdeck)` — it
+    /// participates in SwiftUI's dependency-tracking and avoids
+    /// reaching across module boundaries. The static accessor exists
+    /// for the 50% of the codebase that isn't a View.
+    ///
+    /// Thread-safe; safe to read concurrently from any actor / queue.
+    public static var current: Crossdeck? {
+        currentLock.lock()
+        defer { currentLock.unlock() }
+        return _current
     }
 
     private init(options: CrossdeckOptions) {
@@ -1008,6 +1055,14 @@ public final class Crossdeck: @unchecked Sendable {
         options.debugLogger(.sdkConfigured, [:])
         // Best-effort: persist anything in flight before relinquishing.
         Task { await queue.persistAll() }
+        // Clear the process-singleton iff THIS instance is the one
+        // currently published. If a newer client was already started
+        // (e.g. test teardown sequence), don't clobber its slot.
+        Crossdeck.currentLock.lock()
+        if Crossdeck._current === self {
+            Crossdeck._current = nil
+        }
+        Crossdeck.currentLock.unlock()
     }
 
     private func installErrorCapture() {

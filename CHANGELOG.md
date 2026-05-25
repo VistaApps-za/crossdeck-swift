@@ -4,6 +4,43 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] — 2026-05-25
+
+Dogfood pass on the v1.0.1 surface. One additive API change to close
+the biggest friction point a first-time Swift dev hit walking the
+install path; everything else is documentation / snippet polish that
+ships on cross-deck.com.
+
+### Added
+
+- **`Crossdeck.current`** — process-singleton accessor. Returns the
+  most-recently-started client, or `nil` before `start` has succeeded
+  in this process / after the current client's `stop` is called.
+  Thread-safe via an `NSLock`; safe to read from any actor or queue.
+
+  ```swift
+  // Anywhere outside a SwiftUI view (services, view models,
+  // AppDelegate, Combine pipelines, background workers):
+  Crossdeck.current?.identify(userId: user.id, email: user.email)
+  Crossdeck.current?.track("paywall_seen")
+  if Crossdeck.current?.isEntitled("pro") == true { … }
+  ```
+
+  Inside SwiftUI views, keep using `@Environment(\.crossdeck)` — it
+  participates in dependency tracking and is the idiomatic answer
+  for view bodies. The static accessor is for the 50% of the
+  codebase that isn't a View.
+
+  Bank-grade discipline: `stop()` clears the slot iff the stopped
+  instance is the one currently advertised, so concurrent
+  start+stop sequences on a second client never clobber the first
+  client's slot.
+
+### Changed
+
+- No behaviour changes. Public API is strictly additive — every
+  v1.0.1 caller continues to compile and behave identically.
+
 ## [1.0.1] — 2026-05-25
 
 KPMG/PwC-grade audit pass on the v1.0.0 surface. Every finding the
