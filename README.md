@@ -32,7 +32,19 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.0.2`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
 4. Click **Add Package**. Xcode resolves the package and offers to add the `Crossdeck` library product to your app target — accept.
 
-> **If you added the package before v1.0.0 tags existed, your Xcode UI may show `Dependency Rule: Branch — main` from that initial add.** Open your project's **Package Dependencies** tab, select `crossdeck-swift`, and change the Dependency Rule to **Up to Next Major Version** starting at `1.0.2`. Build to re-resolve.
+> **If your Xcode UI already shows `Dependency Rule: Branch — main` from a pre-v1.0.0 add**, the *File → Add Package Dependencies…* dialog is hard-blocked from changing rules on already-added packages — the Dependency Rule dropdown greys out with "already depends on … with rule main" at the bottom. Removing and re-adding usually loops, too: Xcode's *Recently Used* auto-suggests the package back in with the dropdown still greyed.
+>
+> Change the rule from the project's Package Dependencies tab instead:
+>
+> 1. In the file navigator, click your project's top-level entry (the blue Xcode icon).
+> 2. In the editor pane, select your project under the **PROJECT** column — **not** under TARGETS (the rule editor only lives on the project, not the target).
+> 3. Click the **Package Dependencies** tab.
+> 4. **Double-click** the `crossdeck-swift` row. A sheet opens with the Dependency Rule editor — this is the only UI in Xcode that can change a rule on an already-added package.
+> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.0.2`, click `Done`.
+>
+> If double-click doesn't open the sheet, try right-click → *Modify Package Settings* (label varies by Xcode version).
+>
+> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.0.2; }`, save, reopen.
 
 ### Package.swift
 
