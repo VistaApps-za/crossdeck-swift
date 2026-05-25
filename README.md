@@ -20,21 +20,32 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
 ## Install
 
-### Swift Package Manager
+### Swift Package Manager (Xcode UI)
 
-In Xcode: **File → Add Package Dependencies…**
+1. **File → Add Package Dependencies…**
+2. Paste the URL into the search field:
 
-```
-https://github.com/VistaApps-za/crossdeck-swift.git
-```
+   ```
+   https://github.com/VistaApps-za/crossdeck-swift.git
+   ```
 
-Or in your `Package.swift`:
+3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.0.2`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
+4. Click **Add Package**. Xcode resolves the package and offers to add the `Crossdeck` library product to your app target — accept.
+
+> **If you added the package before v1.0.0 tags existed, your Xcode UI may show `Dependency Rule: Branch — main` from that initial add.** Open your project's **Package Dependencies** tab, select `crossdeck-swift`, and change the Dependency Rule to **Up to Next Major Version** starting at `1.0.2`. Build to re-resolve.
+
+### Package.swift
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/VistaApps-za/crossdeck-swift.git", from: "1.0.0")
+    .package(
+        url: "https://github.com/VistaApps-za/crossdeck-swift.git",
+        from: "1.0.2"
+    ),
 ]
 ```
+
+`from: "1.0.2"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
 
 ## Quickstart
 
