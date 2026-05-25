@@ -2,13 +2,15 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.0.2 — bank-grade.** Modeled line-for-line on the
+> **Status: v1.0.3 — bank-grade.** Modeled line-for-line on the
 > Web/Node/React Native SDKs. All three pillars (analytics events,
 > error capture, entitlement gating) live in one Swift Package
-> with zero runtime dependencies. v1.0.2 adds `Crossdeck.current` —
-> a process-singleton accessor for service / view-model / UIKit
-> call sites where `@Environment(\.crossdeck)` isn't reachable.
-> See [`CHANGELOG.md`](./CHANGELOG.md) for the full release notes.
+> with zero runtime dependencies. v1.0.3 fixes a critical iOS 13
+> compile error in `defaultDebugLogger()`. v1.0.2 added
+> `Crossdeck.current` — a process-singleton accessor for service /
+> view-model / UIKit call sites where `@Environment(\.crossdeck)`
+> isn't reachable. See [`CHANGELOG.md`](./CHANGELOG.md) for the
+> full release notes.
 
 ## Three pillars
 
@@ -29,7 +31,7 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
    https://github.com/VistaApps-za/crossdeck-swift.git
    ```
 
-3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.0.2`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
+3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.0.3`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
 4. Click **Add Package**. Xcode resolves the package and offers to add the `Crossdeck` library product to your app target — accept.
 
 > **If your Xcode UI already shows `Dependency Rule: Branch — main` from a pre-v1.0.0 add**, the *File → Add Package Dependencies…* dialog is hard-blocked from changing rules on already-added packages — the Dependency Rule dropdown greys out with "already depends on … with rule main" at the bottom. Removing and re-adding usually loops, too: Xcode's *Recently Used* auto-suggests the package back in with the dropdown still greyed.
@@ -40,11 +42,11 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 > 2. In the editor pane, select your project under the **PROJECT** column — **not** under TARGETS (the rule editor only lives on the project, not the target).
 > 3. Click the **Package Dependencies** tab.
 > 4. **Double-click** the `crossdeck-swift` row. A sheet opens with the Dependency Rule editor — this is the only UI in Xcode that can change a rule on an already-added package.
-> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.0.2`, click `Done`.
+> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.0.3`, click `Done`.
 >
 > If double-click doesn't open the sheet, try right-click → *Modify Package Settings* (label varies by Xcode version).
 >
-> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.0.2; }`, save, reopen.
+> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.0.3; }`, save, reopen.
 
 ### Package.swift
 
@@ -52,12 +54,12 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 dependencies: [
     .package(
         url: "https://github.com/VistaApps-za/crossdeck-swift.git",
-        from: "1.0.2"
+        from: "1.0.3"
     ),
 ]
 ```
 
-`from: "1.0.2"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
+`from: "1.0.3"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
 
 ## Quickstart
 
@@ -191,9 +193,33 @@ Web, Node, and React Native SDKs.
   box — matches the Web/Node/RN platform contract. Wire
   `setConsent(...)` for an opt-out flow (cookie banner, EU age gate).
 
+## Troubleshooting
+
+### "Missing package product 'Crossdeck'" / "no such module 'Crossdeck'"
+
+The package is in your Package Dependencies but the library product isn't linked to your app target's Frameworks list. Almost always shows up after removing + re-adding a package — often on multiple packages at once (`FirebaseAuth`, `Crossdeck`, `GoogleSignIn` all missing in one build is the same Xcode behaviour, not three different problems).
+
+**Fix — same steps for any Swift package:**
+
+1. Click your project file (blue Xcode icon) in the navigator.
+2. Select your app target under the **TARGETS** column.
+3. Click the **General** tab.
+4. Scroll to **Frameworks, Libraries, and Embedded Content**.
+5. Click `+`. The picker shows every product across all your packages.
+6. Select the missing product (`Crossdeck` under `crossdeck-swift`). Repeat for `FirebaseAuth`, `GoogleSignIn`, etc.
+7. Build.
+
+### `'Logger' is only available in iOS 14.0 or newer` (and similar)
+
+You're on Crossdeck v1.0.0–v1.0.2 with a deployment target below iOS 14. Upgrade to **v1.0.3** — `defaultDebugLogger()` is now availability-gated and falls back to `os_log` on iOS 13. **File → Packages → Update To Latest Package Versions** pulls v1.0.3 if your rule is *Up to Next Major Version*.
+
+### `Branch: main` rule won't change
+
+See the recovery flow inside the **Install** section above. Short version: double-click the row in the project's **Package Dependencies** tab — don't fight the *File → Add Package Dependencies…* dialog (it's hard-blocked from changing rules on existing dependencies).
+
 ## Platforms
 
-- iOS 13+ / iPadOS 13+ (StoreKit purchase rail requires iOS 15+)
+- iOS 13+ / iPadOS 13+ (StoreKit 2 purchase rail requires iOS 15+; `defaultDebugLogger()` falls back to `os_log` below iOS 14)
 - macOS 11+
 - tvOS 13+
 - watchOS 7+

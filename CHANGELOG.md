@@ -4,6 +4,28 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] — 2026-05-25
+
+Critical compile-fix release. v1.0.0–v1.0.2 declared `iOS(.v13)` in
+`Package.swift` but `defaultDebugLogger()` used Apple's modern
+`Logger` API, which is iOS 14 / macOS 11 / tvOS 14 / watchOS 7+.
+Apps with a deployment target below those minimums failed to compile
+the SDK with `'Logger' is only available in iOS 14.0 or newer`.
+
+### Fixed
+
+- `defaultDebugLogger()` now branches on availability. iOS 14+ uses
+  `Logger` with structured `privacy: .public` interpolation; older
+  OS versions fall back to the legacy `os_log` family (iOS 10+).
+  Signal vocabulary identical; Console.app filtering on the
+  `com.crossdeck.sdk` subsystem works on both paths.
+- Package now compiles against any deployment target ≥ iOS 13 —
+  same floor `Package.swift` has always claimed.
+
+### Notes
+
+- No API changes. Strictly additive availability gate.
+
 ## [1.0.2] — 2026-05-25
 
 Dogfood pass on the v1.0.1 surface. One additive API change to close

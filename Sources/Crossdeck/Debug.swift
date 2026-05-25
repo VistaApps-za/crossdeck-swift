@@ -97,18 +97,38 @@ public typealias DebugLogger = @Sendable (_ signal: DebugSignal, _ payload: [Str
 /// the `info` level so production builds collect signals without
 /// flooding `error` / `fault` channels — operators who want the
 /// signals out of the device console can filter on subsystem.
+///
+/// Apple's modern `Logger` API requires iOS 14 / macOS 11 / tvOS 14
+/// / watchOS 7. On older OS versions we fall back to the legacy
+/// `os_log` family (iOS 10+) so the SDK still compiles + runs
+/// against `Package.swift`'s declared minimum (iOS 13). The signal
+/// vocabulary is identical across both paths; only the underlying
+/// logging API differs. Inspect either via Console.app filtering
+/// on the `com.crossdeck.sdk` subsystem.
 public func defaultDebugLogger() -> DebugLogger {
-    let log = Logger(subsystem: "com.crossdeck.sdk", category: "debug")
-    return { signal, payload in
-        if payload.isEmpty {
-            log.info("\(signal.rawValue, privacy: .public)")
-        } else {
-            // Stable, sorted payload rendering so log diffing across
-            // builds doesn't whiplash on dictionary iteration order.
-            let kv = payload.sorted { $0.key < $1.key }
-                .map { "\($0.key)=\($0.value)" }
-                .joined(separator: " ")
-            log.info("\(signal.rawValue, privacy: .public) \(kv, privacy: .public)")
+    if #available(iOS 14.0, macOS 11.0, tvOS 14.0, watchOS 7.0, *) {
+        let log = Logger(subsystem: "com.crossdeck.sdk", category: "debug")
+        return { signal, payload in
+            if payload.isEmpty {
+                log.info("\(signal.rawValue, privacy: .public)")
+            } else {
+                let kv = payload.sorted { $0.key < $1.key }
+                    .map { "\($0.key)=\($0.value)" }
+                    .joined(separator: " ")
+                log.info("\(signal.rawValue, privacy: .public) \(kv, privacy: .public)")
+            }
+        }
+    } else {
+        let log = OSLog(subsystem: "com.crossdeck.sdk", category: "debug")
+        return { signal, payload in
+            if payload.isEmpty {
+                os_log("%{public}@", log: log, type: .info, signal.rawValue)
+            } else {
+                let kv = payload.sorted { $0.key < $1.key }
+                    .map { "\($0.key)=\($0.value)" }
+                    .joined(separator: " ")
+                os_log("%{public}@ %{public}@", log: log, type: .info, signal.rawValue, kv)
+            }
         }
     }
 }
