@@ -125,6 +125,16 @@ public actor HTTPClient {
         // dark even though events are landing. Match Web/Node/RN
         // header naming exactly.
         req.setValue("\(SDK.name)@\(SDK.version)", forHTTPHeaderField: "Crossdeck-Sdk-Version")
+        // Apple Bundle ID identity claim (X-Crossdeck-Bundle-Id) — the
+        // backend's isBundleIdAllowed() enforces this against the
+        // bundleId stored on the iOS app key. Bank-grade fail-closed:
+        // a request without this header (or with a mismatched value)
+        // is rejected with 403 / bundle_id_not_allowed. Sourced from
+        // Bundle.main.bundleIdentifier — the OS-canonical ID Apple
+        // itself uses for App Store identity.
+        if let bundleId = Bundle.main.bundleIdentifier {
+            req.setValue(bundleId, forHTTPHeaderField: "X-Crossdeck-Bundle-Id")
+        }
         if let idempotencyKey {
             req.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         }
@@ -145,6 +155,11 @@ public actor HTTPClient {
         // Same per-SDK-surface registration as the generic path —
         // the queue's batches need to register the SDK surface too.
         req.setValue("\(SDK.name)@\(SDK.version)", forHTTPHeaderField: "Crossdeck-Sdk-Version")
+        // Bundle ID identity claim on every batch — same bank-grade
+        // identity-lock contract as the generic request() path.
+        if let bundleId = Bundle.main.bundleIdentifier {
+            req.setValue(bundleId, forHTTPHeaderField: "X-Crossdeck-Bundle-Id")
+        }
         req.httpBody = body
         return await dispatch(req)
     }

@@ -4,6 +4,41 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-05-25
+
+Bank-grade identity lock — the Apple Bundle ID is now sent on
+every request and enforced server-side, mirroring the Origin
+lock the Web SDK has always had.
+
+### Added — Apple Bundle ID identity claim
+
+Every HTTP request the SDK fires now carries an
+`X-Crossdeck-Bundle-Id` header sourced from
+`Bundle.main.bundleIdentifier` — the OS-canonical ID Apple itself
+uses for App Store identity.
+
+The Crossdeck backend's `isBundleIdAllowed()` validator enforces
+this against the bundleId stored on the iOS app key. Requests
+without the header, or with a mismatched value, are rejected
+with `403 / bundle_id_not_allowed`.
+
+Bank-grade contract — same shape as the Web SDK's Origin lock:
+- empty stored bundleId on the key → request rejected
+- missing header on the request → request rejected
+- exact-match required (case-sensitive — Apple's own convention)
+
+### Migration
+
+Customers must:
+1. Bump SPM Dependency Rule to v1.3.0.
+2. Rebuild + resubmit to App Store Connect.
+3. Confirm `apps.ios.bundleId` is set on the project's iOS app
+   in the Crossdeck dashboard (Apps → Bundle ID editor).
+
+Apps shipped with v1.2.0 or earlier will start receiving 403s
+once the backend enforcement deploys, because they don't send
+the new header.
+
 ## [1.2.0] — 2026-05-25
 
 Full bank-grade parity with the Web/Node/RN SDKs. v1.1.0 closed the
