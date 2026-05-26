@@ -4,6 +4,30 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.5] — 2026-05-26
+
+SwiftUI screen tracking — the iOS half of "log in tomorrow morning
+and see what users tapped on yesterday."
+
+**Added:**
+
+- **`View.crossdeckScreen("Name")`** — public SwiftUI modifier that
+  fires `page.viewed` with `{ screen, title }` properties when the
+  view appears. SwiftUI's view tree hides class names from the
+  iOS SDK's swizzle-based auto-track (the host is always
+  `UIHostingController<…>`, denylisted for the right reason), so
+  pure-SwiftUI apps emitted zero `page.viewed` events. One line
+  per screen and the Pages dashboard populates the same way it
+  does for a web app's URL list. Matches the pattern Mixpanel /
+  Amplitude / PostHog ship on iOS; pairs with the Pages-backend
+  change that groups by `screen` when `url` / `path` are absent.
+  Properties are also forwarded through `cd.track(...)` so the
+  standard coercion + size guard apply.
+
+No behavioural change to existing UIKit auto-track — UIKit screens
+keep firing `page.viewed` automatically via the
+`UIViewController.viewDidAppear` swizzle (unchanged).
+
 ## [1.4.4] — 2026-05-26
 
 Bank-grade SwiftUI integration polish. The Quickstart snippet now

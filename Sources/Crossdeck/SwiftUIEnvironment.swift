@@ -70,4 +70,69 @@ extension EnvironmentValues {
     }
 }
 
+extension View {
+    /// Fire a `page.viewed` event when this view appears.
+    ///
+    /// SwiftUI screens don't surface a stable class name to the iOS
+    /// SDK's swizzle-based auto-track (the host is always
+    /// `UIHostingController<…>`, which the auto-track denylist
+    /// rightly skips). This modifier is how a pure-SwiftUI app tells
+    /// the dashboard "the user just landed on this screen" without
+    /// going through `cd?.track(...)` by hand at every call site.
+    ///
+    /// Usage:
+    ///
+    /// ```swift
+    /// CreateImageView()
+    ///     .crossdeckScreen("Create Image")
+    /// ```
+    ///
+    /// The event payload mirrors `page.viewed` on Web/UIKit so the
+    /// Pages dashboard renders one unified list across surfaces.
+    ///
+    /// - Parameters:
+    ///   - name: Human-readable screen name. Shown verbatim on the
+    ///     Pages dashboard — keep it short and stable across releases
+    ///     ("Create Image", not "CreateImageVC_v3"). Truncated to 128
+    ///     chars to match the host-side title cap.
+    ///   - properties: Optional extra properties to attach to the
+    ///     event. Wired through `cd.track(...)` so the standard
+    ///     coercion / size guard apply.
+    public func crossdeckScreen(
+        _ name: String,
+        properties: [String: Any]? = nil
+    ) -> some View {
+        modifier(CrossdeckScreenModifier(name: name, extraProperties: properties))
+    }
+}
+
+private struct CrossdeckScreenModifier: ViewModifier {
+    @Environment(\.crossdeck) private var cd
+    let name: String
+    let extraProperties: [String: Any]?
+
+    func body(content: Content) -> some View {
+        content.onAppear {
+            guard let cd else { return }
+            let trimmed = String(name.prefix(128))
+            // Match the Web/UIKit `page.viewed` shape so the Pages
+            // dashboard groups them uniformly. `screen` is the
+            // canonical mobile-screen key the backend groups on
+            // when url/path is absent; `title` mirrors what Web
+            // auto-track sends so the dashboard's title-first
+            // GA-style display has a value to render.
+            var props: [String: Any] = [
+                "screen": trimmed,
+                "title": trimmed,
+            ]
+            if let extraProperties {
+                for (k, v) in extraProperties where props[k] == nil {
+                    props[k] = v
+                }
+            }
+            cd.track("page.viewed", properties: props)
+        }
+    }
+}
+
 #endif

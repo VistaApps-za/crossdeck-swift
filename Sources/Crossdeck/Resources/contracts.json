@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "generatedAt": "2026-05-26T15:29:27.702Z",
+  "generatedAt": "2026-05-26T16:37:11.447Z",
   "sdk": "@cross-deck/swift",
-  "sdkVersion": "1.4.4",
-  "bundledIn": "@cross-deck/swift@1.4.4",
+  "sdkVersion": "1.4.5",
+  "bundledIn": "@cross-deck/swift@1.4.5",
   "count": 11,
   "contracts": [
     {
@@ -49,7 +49,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.1",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "error-envelope-shape",
@@ -88,7 +88,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 8 (codifies existing contract)",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "flush-interval-parity",
@@ -133,7 +133,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.3",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "idempotency-key-deterministic",
@@ -238,7 +238,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.2.a + 2.2.b + 2.2.c",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "native-error-type-wire-vocab",
@@ -281,7 +281,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 6.1",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "per-user-cache-isolation",
@@ -360,7 +360,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 1.3 (web/RN) + dogfood-gap fix (swift + android)",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "purchase-finish-iff-success",
@@ -394,7 +394,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 1.2",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "super-property-merge-precedence",
@@ -428,7 +428,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.2",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "swift-async-lifecycle",
@@ -465,7 +465,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.3 + 5.3",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "swift-lifecycle-clean-teardown",
@@ -495,7 +495,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 5.1 + 5.2",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     },
     {
       "id": "sync-purchases-funnel-parity",
@@ -528,7 +528,7 @@
       ],
       "registeredAt": "2026-05-26",
       "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.5",
-      "bundledIn": "@cross-deck/swift@1.4.4"
+      "bundledIn": "@cross-deck/swift@1.4.5"
     }
   ]
 }
