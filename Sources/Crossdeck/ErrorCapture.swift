@@ -84,14 +84,21 @@ public final class ErrorCapture: @unchecked Sendable {
     /// before us.
     private var priorExceptionHandler: (@convention(c) (NSException) -> Void)?
 
-    /// Install the global handlers (NSSetUncaughtExceptionHandler).
-    /// Idempotent — calling twice replaces the routing but does
-    /// not re-register the global C hook.
+    /// Wire the capture pipeline. ALWAYS sets the routing closure so
+    /// manual `cd.captureError(...)` calls reach the queue — this
+    /// MUST work regardless of whether the global uncaught-handler
+    /// is installed. The OS-level NSSetUncaughtExceptionHandler is
+    /// gated separately via [installGlobalHandler] so consumers
+    /// running Crashlytics / Sentry as their primary crash reporter
+    /// can opt out of our global hook without losing manual capture.
+    ///
+    /// Idempotent — calling twice replaces the routing closures.
     public func install(
         beforeSend: BeforeSendErrorHandler?,
         breadcrumbs: @escaping @Sendable () async -> [Breadcrumb],
         selfHostname: String?,
-        capture: @escaping @Sendable (CapturedError) -> Void
+        capture: @escaping @Sendable (CapturedError) -> Void,
+        installGlobalHandler: Bool
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -100,17 +107,16 @@ public final class ErrorCapture: @unchecked Sendable {
         self.breadcrumbsSnapshot = breadcrumbs
         self.selfHostname = selfHostname
 
-        guard !installed else { return }
-        installed = true
-
-        // Chain into whatever handler was registered before us
-        // (Crashlytics, Sentry, etc.). If we don't capture this,
-        // we silently break every other crash reporter on the
-        // device.
-        self.priorExceptionHandler = NSGetUncaughtExceptionHandler()
-
-        NSSetUncaughtExceptionHandler { exception in
-            ErrorCapture.shared.captureFromExceptionHandler(exception)
+        if installGlobalHandler && !installed {
+            installed = true
+            // Chain into whatever handler was registered before us
+            // (Crashlytics, Sentry, etc.). If we don't capture this,
+            // we silently break every other crash reporter on the
+            // device.
+            self.priorExceptionHandler = NSGetUncaughtExceptionHandler()
+            NSSetUncaughtExceptionHandler { exception in
+                ErrorCapture.shared.captureFromExceptionHandler(exception)
+            }
         }
     }
 

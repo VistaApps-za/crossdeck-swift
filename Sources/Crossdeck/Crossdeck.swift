@@ -418,9 +418,14 @@ public final class Crossdeck: @unchecked Sendable {
             "sdk_version": SDK.version,
         ])
 
-        if options.captureUncaughtExceptions {
-            installErrorCapture()
-        }
+        // ALWAYS install the manual error-capture routing closure so
+        // cd.captureError(...) works on every project. The OS-level
+        // NSSetUncaughtExceptionHandler is gated separately inside
+        // installErrorCapture via the captureUncaughtExceptions option,
+        // so consumers who prefer Crashlytics / Sentry as their primary
+        // global handler can still receive manual captures from
+        // do/catch blocks without our global hook in the chain.
+        installErrorCapture()
 
         installLifecycleObservers()
 
@@ -1468,7 +1473,8 @@ public final class Crossdeck: @unchecked Sendable {
                 // off via Task here, which is the same pattern the
                 // track() pipeline uses.
                 Task { await queueRef.enqueue(wire) }
-            }
+            },
+            installGlobalHandler: options.captureUncaughtExceptions
         )
     }
 
