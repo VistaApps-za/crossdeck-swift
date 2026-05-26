@@ -4,6 +4,72 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-05-26
+
+**Bank-grade reconciliation release.** 6-pillar KPMG-style audit
+closed across SDK + backend. Every behavioural guarantee registered
+in the monorepo's `contracts/` directory with a CI-enforced audit job.
+
+### Added
+
+- **`PurchaseAutoTrack` purchase durability.** `transaction.finish()`
+  is now called STRICTLY inside the success branch of the backend
+  sync. Pre-1.4.0 it fired regardless of outcome — a 5xx mid-process-
+  death silently lost the purchase. Failed syncs persist to a new
+  `PendingPurchaseQueue` (max 5 in-process retries, exp backoff
+  30s/1m/5m/30m/2h).
+- **Proper `appAccountToken` UUID conformance.** Derived from
+  `developerUserId` via `AppAccountTokenDerivation` (UUID
+  passthrough, else UUID v5 from URL namespace + `crossdeck:<id>`,
+  else omit). Numeric StoreKit `originalTransactionId` now rides
+  in its own dedicated wire field — pre-1.4.0 it was stuffed into
+  the UUID-shaped `appAccountToken`, violating Apple's StoreKit
+  contract.
+- **Deterministic `Idempotency-Key` on `syncPurchases()`** — same
+  JWS → same key. Cross-SDK parity oracle CI-pinned.
+- **`PurchaseResult.idempotent_replay?: Bool`** — true when the
+  backend replayed a cached response.
+- **`purchase.completed` on every successful manual
+  `syncPurchases()`** — funnel parity with auto-track.
+
+### Changed (breaking)
+
+- **`reset()` is now `async`**. Awaits identity / entitlements /
+  super-properties / breadcrumbs clear before returning. New
+  `isResetting` tombstone flips synchronously at entry; `isEntitled`
+  honours it and returns false during the clear window — closes
+  the race between a logout button firing reset() and the actor-
+  internal clear completing. `resetSync()` exists for callers that
+  cannot await.
+- **`stop()` is now `async`**. Awaits `queue.persistAll()` and
+  cancels stored boot + heartbeat Tasks. Pre-1.4.0 the Tasks ran
+  fire-and-forget against actors of stopped clients. `stopSync()`
+  exists for tests / deinit paths.
+- **`CrossdeckErrorType.internalError` / `.configurationError`
+  added; `.apiError` / `.unknown` deprecated** with `@available(*,
+  deprecated, renamed:)`. Backend's `ApiErrorType` never emitted
+  `"api_error"` or `"unknown_error"` on the wire — native pattern-
+  matching on the deprecated cases only matched the SDK-synthesised
+  fallback, never a real backend envelope. Use `.internalError`
+  for 5xx responses.
+
+### Added (continued)
+
+- **`NSNotificationCenter` observer cleanup in `stop()`.** Pre-1.4.0
+  every start→stop→start cycle leaked N orphan observers; each
+  subsequent didEnterBackground fired N stacked queue.flush() against
+  dead Crossdecks. Stored tokens, removed via
+  `uninstallLifecycleObservers()`.
+- **`ErrorCapture.shared.uninstall()` called in `stop()`.** Pre-1.4.0
+  the global exception handler retained queue/identity/consent/
+  breadcrumb actors of the stopped client; next uncaught exception
+  shipped through dead actors.
+- **Super-property merge order matches Web/Node/RN** — device <
+  super < caller. Pre-1.4.0 Swift had it inverted (super < device <
+  caller, so device clobbered super-properties).
+- **Default event-queue flush interval is now 2000ms** (was 5000ms)
+  — cross-SDK parity.
+
 ## [1.3.0] — 2026-05-25
 
 Bank-grade identity lock — the Apple Bundle ID is now sent on

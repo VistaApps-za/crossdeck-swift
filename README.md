@@ -217,6 +217,20 @@ Web, Node, and React Native SDKs.
   ingest endpoint are skipped — no feedback loops.
 - **Breadcrumbs.** Ring buffer of the user's last 50 actions
   attached to every captured error.
+- **Clean `stop()` teardown (v1.4.0).** `Crossdeck.stop()` calls
+  `ErrorCapture.shared.uninstall()` so the global exception hook
+  releases its references to the stopped client. A subsequent
+  `start()` reinstalls cleanly. **Apple platform caveat:**
+  `NSSetUncaughtExceptionHandler` has no removal API; if your app
+  installed an exception handler before Crossdeck did,
+  uninstall() restores the chained prior handler so it continues
+  to receive uncaught exceptions after the SDK stops.
+- **Lifecycle observer cleanup (v1.4.0).** `stop()` deregisters
+  every `NSNotificationCenter` observer the SDK installed for
+  background-flush / will-terminate / persist-all. Pre-v1.4.0
+  every start→stop→start cycle leaked observers; each subsequent
+  `didEnterBackgroundNotification` fired N stacked
+  `queue.flush()` calls against dead Crossdecks.
 
 ### Entitlements
 
@@ -225,6 +239,95 @@ Web, Node, and React Native SDKs.
   prior user's entitlements after identify.
 - **Synchronous read.** `isEntitled(...)` returns instantly from
   cache. Paywall gates do not block on network.
+
+### Purchases — `appAccountToken` contract (v1.4.0)
+
+Apple defines `appAccountToken` as a **UUID** in the StoreKit contract.
+Pre-v1.4.0 the auto-track path stuffed the numeric
+`originalTransactionId` into this field — passing the SDK but
+violating the StoreKit contract and any downstream system that
+interpreted the value as a UUID. The wire shape is fixed in v1.4.0:
+
+- **`appAccountToken`** is derived from `developerUserId` via
+  `AppAccountTokenDerivation`:
+  - If the id parses as a UUID, use it directly.
+  - Else derive RFC 4122 UUID v5 from the URL namespace +
+    `crossdeck:<id>` (deterministic — resubmitting the same purchase
+    produces the same token, which Apple uses for cross-receipt
+    linkage).
+  - Else omit the field — never silently send a wrong UUID.
+- **`originalTransactionId`** is now sent in its own dedicated wire
+  field. StoreKit's numeric id never collides with the UUID slot.
+- The backend validator **rejects non-UUID `appAccountToken`** with
+  400 as of v1.4.0. Pre-1.4.0 SDK builds will start receiving
+  `appAccountToken must be in canonical RFC 4122 UUID format`
+  responses. Upgrade the SDK to fix.
+
+### Purchases (StoreKit 2 auto-track)
+
+Enable with `CrossdeckOptions(automaticPurchaseTracking: true)`. Off
+by default — opt in if you don't already call `syncPurchases()` from
+your own `Transaction.updates` listener.
+
+- **`transaction.finish()` iff backend acknowledged.** Bank-grade
+  invariant: the SDK calls `transaction.finish()` STRICTLY inside
+  the success branch of `/purchases/sync`. A 5xx during sync leaves
+  the StoreKit transaction unfinished so Apple's re-delivery on the
+  next session keeps the purchase alive — mid-process-death plus
+  a transient backend outage CANNOT silently lose revenue.
+- **In-process retry queue.** A failed sync is persisted to the
+  `PendingPurchaseQueue` (UserDefaults-backed; injectable via
+  `CrossdeckOptions.storage`). A background drain task wakes every
+  30s, finds entries whose `nextRetryAt` has elapsed, and
+  re-attempts the sync via the matching `Transaction.unfinished`
+  entry. On success: `.finish()` + clear. On failure: re-record
+  with the next backoff.
+- **Bounded retries, exponential backoff.** Max 5 in-process
+  attempts at 30s / 1m / 5m / 30m / 2h. Beyond the cap the queue
+  entry is dropped but the StoreKit transaction REMAINS
+  unfinished — Apple's re-delivery on the next session takes over.
+  We never pretend to know better than the platform.
+- **Failure telemetry.** A failed sync emits a `purchase.sync_failed`
+  event (and `purchase.sync_retry_failed` on subsequent retries)
+  with typed `errorType` / `errorCode` / `statusCode` /
+  `originalTransactionId` so dashboards surface the revenue at risk
+  in real time.
+
+### Lifecycle — async stop() + async reset() (v1.4.0)
+
+**Breaking from v1.3.x.** Both `stop()` and `reset()` are now
+`async` so the caller knows when teardown is durably complete.
+
+```swift
+// Logout / sign-out
+await crossdeck.reset()   // awaits identity/cache/super-prop wipe
+
+// SDK teardown (test cleanup, app shutdown)
+await crossdeck.stop()    // awaits queue.persistAll() before returning
+```
+
+If the caller cannot await (deinit, signal handler, non-async
+SwiftUI button handler), use the sync variants:
+
+```swift
+crossdeck.stopSync()   // module teardown without awaiting persist
+crossdeck.resetSync()  // tombstone flips synchronously; clear runs in detached Task
+```
+
+**Bank-grade tombstone (Phase 2.3).** During the `reset()` clear
+window, `isEntitled` returns `false` IMMEDIATELY via an
+`isResetting` tombstone — closes the race between a logout button
+firing `reset()` and the actor-internal clear completing, where a
+paywall gate could otherwise read the prior identified user's
+cached entitlements between caller invocation and actor work.
+
+**Bank-grade Task cancellation (Phase 5.3).** Background Tasks
+spawned at `start()` (boot flush, heartbeat) are stored as
+instance properties; `stop()` cancels them cooperatively before
+returning. Pre-v1.4.0 they were fire-and-forget with no handle
+and would keep running against released actors of a stopped
+client. Cancellation propagates through `URLSession` so in-flight
+HTTP aborts cleanly.
 
 ### Identity
 

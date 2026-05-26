@@ -132,5 +132,14 @@ struct PurchaseSyncRequest: Encodable {
     let rail: String
     let signedTransactionInfo: String?
     let signedRenewalInfo: String?
+    /// RFC 4122 UUID (canonical 8-4-4-4-12 lowercase hex). Derived
+    /// from `developerUserId` via [[AppAccountTokenDerivation]] on
+    /// the auto-track path; passed by the caller on the manual
+    /// `syncPurchases` path. Backend rejects non-UUID values with
+    /// 400 as of v1.4.0.
     let appAccountToken: String?
+    /// StoreKit's `Transaction.originalID` — numeric string. Lives
+    /// on its own wire field as of v1.4.0 so it never collides
+    /// with the UUID-shaped `appAccountToken`.
+    let originalTransactionId: String?
 }

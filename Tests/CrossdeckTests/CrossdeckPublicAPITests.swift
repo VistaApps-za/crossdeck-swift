@@ -23,7 +23,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
     func test_identify_unconditionallyClearsEntitlementCache() async {
         let storage = MemoryStorage()
         let cd = makeClient(storage: storage)
-        defer { cd.stop() }
+        defer { cd.stopSync() }
 
         try? cd.identify(userId: "u_1")
         // Warm the cache for u_1.
@@ -54,7 +54,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_identify_clearsCacheAcrossCustomerSwitch() async {
         let cd = makeClient()
-        defer { cd.stop() }
+        defer { cd.stopSync() }
 
         try? cd.identify(userId: "u_1")
         try? cd.identify(userId: "u_2")
@@ -69,7 +69,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_isEntitled_returnsFalseWithoutIdentify() {
         let cd = makeClient()
-        defer { cd.stop() }
+        defer { cd.stopSync() }
         XCTAssertFalse(cd.isEntitled("pro"))
         XCTAssertNil(cd.entitlementsForCurrentCustomer())
     }
@@ -80,7 +80,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
         // Exercising from a Task confirms it doesn't accidentally
         // require an `await`.
         let cd = makeClient()
-        defer { cd.stop() }
+        defer { cd.stopSync() }
 
         try? cd.identify(userId: "u_1")
 
@@ -92,7 +92,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_stop_rejectsSubsequentTrackCalls() {
         let cd = makeClient()
-        cd.stop()
+        cd.stopSync()
         XCTAssertThrowsError(try cd.track("post_stop_event")) { err in
             let cd = err as? CrossdeckError
             XCTAssertEqual(cd?.code, "not_initialized")
@@ -101,7 +101,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_stop_rejectsSubsequentIdentifyCalls() {
         let cd = makeClient()
-        cd.stop()
+        cd.stopSync()
         XCTAssertThrowsError(try cd.identify(userId: "u_1")) { err in
             let cd = err as? CrossdeckError
             XCTAssertEqual(cd?.code, "not_initialized")
@@ -110,8 +110,8 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_stop_isIdempotent() {
         let cd = makeClient()
-        cd.stop()
-        cd.stop() // second call must not crash
+        cd.stopSync()
+        cd.stopSync()  // second call must not crash
         // Still rejects after multiple stops.
         XCTAssertThrowsError(try cd.track("e"))
     }
@@ -120,7 +120,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_track_rejectsEmptyName() {
         let cd = makeClient()
-        defer { cd.stop() }
+        defer { cd.stopSync() }
         XCTAssertThrowsError(try cd.track("")) { err in
             let cd = err as? CrossdeckError
             XCTAssertEqual(cd?.code, "missing_event_name")
@@ -133,7 +133,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
         // a warning surfaces via the debug logger. Matches
         // Web/Node/RN behaviour.
         let cd = makeClient()
-        defer { cd.stop() }
+        defer { cd.stopSync() }
         XCTAssertNoThrow(try cd.track("e", properties: ["amount": Double.nan]))
     }
 
@@ -141,7 +141,7 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     func test_identify_rejectsEmptyId() {
         let cd = makeClient()
-        defer { cd.stop() }
+        defer { cd.stopSync() }
         XCTAssertThrowsError(try cd.identify(userId: "")) { err in
             let cd = err as? CrossdeckError
             XCTAssertEqual(cd?.code, "missing_user_id")

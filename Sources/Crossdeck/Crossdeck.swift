@@ -272,6 +272,47 @@ public final class Crossdeck: @unchecked Sendable {
     /// below iOS 15.
     private var purchaseAutoTrack: Any?
 
+    /// NSNotificationCenter observer tokens captured by
+    /// [installLifecycleObservers]. Pre-v1.4.0 the `addObserver`
+    /// return values were discarded — every start()/stop()/start()
+    /// cycle leaked N orphan observers, each one firing a stacked
+    /// `queue.flush()` against dead Crossdecks on every
+    /// didEnterBackground. v1.4.0 stores the tokens here so stop()
+    /// can deregister them with `removeObserver(token)`.
+    ///
+    /// `internal` so the test target can assert
+    /// `start→stop→start leaves zero observers`. Production code
+    /// must NEVER read or write this property — use the
+    /// install/uninstall methods.
+    internal var lifecycleObserverTokens: [NSObjectProtocol] = []
+
+    /// v1.4.0 Phase 5.3 — stored Task handles for the boot + heartbeat
+    /// background tasks spawned at start(). Pre-v1.4.0 these were
+    /// fire-and-forget with no handle, so stop() couldn't cancel
+    /// them. They'd keep running against actors of a stopped
+    /// Crossdeck until they naturally completed. Storing the handles
+    /// lets stop() call .cancel() — cooperative cancellation drains
+    /// the in-flight HTTP via URLSession's signal-aware request path.
+    private var bootTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
+
+    /// v1.4.0 Phase 2.3 — tombstone flag honoured by isEntitled
+    /// during the reset() clear window. Closes the race between
+    /// caller invocation of reset() and the actor-internal clear
+    /// completing: callers (paywall gates, etc) get `false` while
+    /// the reset is in flight, never the prior identified user's
+    /// cached entitlements.
+    ///
+    /// `internal` so the test target can assert the tombstone
+    /// flips during the async reset.
+    internal var isResetting: Bool {
+        resettingLock.lock()
+        defer { resettingLock.unlock() }
+        return _isResetting
+    }
+    private var _isResetting: Bool = false
+    private let resettingLock = NSLock()
+
     // Process-singleton accessor — exposes the most-recently-started
     // client so services / view models / non-SwiftUI surfaces can
     // reach the SDK without an explicit injection. SwiftUI views
@@ -432,7 +473,10 @@ public final class Crossdeck: @unchecked Sendable {
         // Try a flush on start to ship anything rehydrated from
         // the prior session. Fire-and-forget — if there's nothing
         // to send, this is a no-op.
-        Task { await queue.flush() }
+        // v1.4.0 Phase 5.3 — store the boot flush Task handle so
+        // stop() can cancel it. Pre-v1.4.0 it ran fire-and-forget
+        // against actors of a potentially-stopped client.
+        bootTask = Task { await queue.flush() }
 
         // Boot heartbeat. POSTs /sdk/heartbeat so the dashboard's
         // onboarding checklist flips LIVE within ~200ms — same shape
@@ -440,7 +484,8 @@ public final class Crossdeck: @unchecked Sendable {
         // surfaced via the debug logger. Skipped automatically when
         // `captureUncaughtExceptions: false` AND we're in a test
         // build via the urlSession injection (URLProtocol stub).
-        Task { _ = await self.heartbeat() }
+        // Stored handle (v1.4.0 Phase 5.3) so stop() cancels.
+        heartbeatTask = Task { _ = await self.heartbeat() }
 
         // ---- Auto-tracking & ambient signal modules ----
         //
@@ -492,6 +537,8 @@ public final class Crossdeck: @unchecked Sendable {
             if #available(iOS 15.0, *) {
                 let httpRef = http
                 let debugLogger = options.debugLogger
+                let pendingQueue = PendingPurchaseQueue(storage: storage)
+                let identityRef = identity
                 let purchaseTracker = PurchaseAutoTrack(
                     emitTrack: weakSelf,
                     syncBackend: { jws, originalTransactionId in
@@ -499,28 +546,76 @@ public final class Crossdeck: @unchecked Sendable {
                         // — single contract surface. Build the same
                         // PurchaseSyncRequest payload so server-side
                         // parsing is identical between manual and
-                        // automatic paths.
+                        // automatic paths. Returns a typed Result so
+                        // PurchaseAutoTrack can apply the bank-grade
+                        // "finish iff success" contract + persist
+                        // failures to the retry queue.
+                        //
+                        // appAccountToken is derived from
+                        // developerUserId via
+                        // AppAccountTokenDerivation (UUID v5 in the
+                        // URL namespace if the id isn't already a
+                        // UUID). The numeric StoreKit
+                        // originalTransactionId rides in its OWN
+                        // wire field as of v1.4.0 — pre-1.4.0 it
+                        // was stuffed into appAccountToken, which
+                        // violated the StoreKit UUID contract.
+                        let snap = identityRef.snapshotSync()
+                        let derivedToken = AppAccountTokenDerivation
+                            .derive(developerUserId: snap.developerUserId)
                         let body = PurchaseSyncRequest(
                             rail: "apple",
                             signedTransactionInfo: jws,
                             signedRenewalInfo: nil,
-                            appAccountToken: originalTransactionId
+                            appAccountToken: derivedToken,
+                            originalTransactionId: originalTransactionId
                         )
-                        guard let bodyData = try? JSONEncoder().encode(body) else { return }
+                        guard let bodyData = try? JSONEncoder().encode(body) else {
+                            return .failure(CrossdeckError(
+                                type: .invalidRequest,
+                                code: "auto_purchase_encode_failed",
+                                message: "Failed to encode PurchaseSyncRequest for /purchases/sync."
+                            ))
+                        }
+                        // Phase 2.2.c — deterministic Idempotency-Key
+                        // from the JWS so a retry (network blip,
+                        // app-crash mid-flight, Apple re-delivery)
+                        // lands on the same key + the backend
+                        // short-circuits with idempotent_replay:true.
+                        // Falls back to a fresh UUID only if the JWS
+                        // is somehow absent (shouldn't happen — the
+                        // auto-track path always carries one).
+                        let derivedKey = IdempotencyKey.deriveForPurchase(
+                            rail: "apple",
+                            signedTransactionInfo: jws,
+                            purchaseToken: nil
+                        ) ?? ("auto_purch_" + UUID().uuidString
+                            .lowercased()
+                            .replacingOccurrences(of: "-", with: ""))
                         let outcome = await httpRef.request(
                             method: "POST",
                             path: "/purchases/sync",
                             body: bodyData,
-                            idempotencyKey: "auto_purch_" + UUID().uuidString
-                                .lowercased()
-                                .replacingOccurrences(of: "-", with: "")
+                            idempotencyKey: derivedKey
                         )
-                        if outcome.kind != .success {
-                            debugLogger(.sdkConfigured, [
-                                "auto_purchase_sync_failed": String(describing: outcome.error),
-                            ])
+                        if outcome.kind == .success {
+                            return .success(())
                         }
-                    }
+                        let typed = outcome.error ?? CrossdeckError(
+                            type: .internalError,
+                            code: "auto_purchase_sync_failed",
+                            message: "/purchases/sync did not succeed.",
+                            statusCode: outcome.envelope?.statusCode
+                        )
+                        debugLogger(.sdkConfigured, [
+                            "auto_purchase_sync_failed": "true",
+                            "error_type": typed.type.rawValue,
+                            "error_code": typed.code,
+                            "status_code": typed.statusCode as Any,
+                        ])
+                        return .failure(typed)
+                    },
+                    pendingQueue: pendingQueue
                 )
                 purchaseTracker.start()
                 self.purchaseAutoTrack = purchaseTracker
@@ -631,10 +726,22 @@ public final class Crossdeck: @unchecked Sendable {
         let devicePayload = device.asPayload
 
         Task {
-            var merged: [String: Any] = [:]
-            for (k, v) in superPropsSnapshot { merged[k] = v }
-            for (k, v) in devicePayload { merged[k] = v }
-            for (k, v) in codedSnapshot { merged[k] = v.value }
+            // v1.4.0 Phase 3.2 — super-property merge order parity.
+            // Lifted into a pure helper so the precedence contract
+            // (caller > super > device) is CI-pinned regardless of
+            // call-site changes. Pre-v1.4.0 Swift had it inverted
+            // (super < device < caller — device overrode super), so
+            // a register("plan", "pro") super-property got clobbered
+            // by the auto-attached device info on every event.
+            // Cross-SDK funnel queries on super-property keys
+            // returned different answers per platform.
+            var callerBag: [String: Any] = [:]
+            for (k, v) in codedSnapshot { callerBag[k] = v.value }
+            var merged = EventPropertyMerge.merge(
+                device: devicePayload,
+                superProperties: superPropsSnapshot,
+                caller: callerBag
+            )
             // Add sessionId LAST so the auto-track anchor wins over
             // any caller-supplied "sessionId" key. Skip when no
             // session is active (rare — only happens between
@@ -917,7 +1024,7 @@ public final class Crossdeck: @unchecked Sendable {
                 return
             }
             throw outcome.error ?? CrossdeckError(
-                type: .apiError,
+                type: .internalError,
                 code: "forget_failed",
                 message: "/identity/forget did not succeed. Local state already wiped — server retry needed."
             )
@@ -953,23 +1060,41 @@ public final class Crossdeck: @unchecked Sendable {
         // from the JWS), but we still need the developerUserId
         // locally to key the entitlement cache.
         let snap = identity.snapshotSync()
+        // Manual path: if the caller supplied an appAccountToken
+        // explicitly, honour it; else derive one from
+        // developerUserId so the contract matches the auto-track
+        // path (v1.4.0 — bank-grade UUID conformance).
+        let resolvedToken = appAccountToken ?? AppAccountTokenDerivation
+            .derive(developerUserId: snap.developerUserId)
         let body = PurchaseSyncRequest(
             rail: rail.rawValue,
             signedTransactionInfo: signedTransactionInfo,
             signedRenewalInfo: signedRenewalInfo,
-            appAccountToken: appAccountToken
+            appAccountToken: resolvedToken,
+            originalTransactionId: nil
         )
         let bodyData = try JSONEncoder().encode(body)
+        // Phase 2.2.c — deterministic Idempotency-Key from the rail-
+        // stable identifier. Same JWS / purchaseToken → same key →
+        // backend short-circuits with idempotent_replay:true on
+        // retry. Falls back to a fresh batch_ UUID only if no
+        // identifier was supplied (legacy callers; new code should
+        // always pass one of signedTransactionInfo / purchaseToken).
+        let idempotencyKey = IdempotencyKey.deriveForPurchase(
+            rail: rail.rawValue,
+            signedTransactionInfo: signedTransactionInfo,
+            purchaseToken: nil
+        ) ?? ("batch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))
         let outcome = await http.request(
             method: "POST",
             path: "/purchases/sync",
             body: bodyData,
-            idempotencyKey: "batch_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+            idempotencyKey: idempotencyKey
         )
         guard outcome.kind == .success,
               let data = outcome.envelope?.body else {
             throw outcome.error ?? CrossdeckError(
-                type: .apiError,
+                type: .internalError,
                 code: "sync_purchases_failed",
                 message: "/purchases/sync did not succeed."
             )
@@ -983,6 +1108,20 @@ public final class Crossdeck: @unchecked Sendable {
                 entitlements: result.entitlements
             ))
         }
+        // Phase 3.5 (v1.4.0) — emit purchase.completed so manual
+        // syncPurchases callers show up on the same funnel as the
+        // StoreKit auto-track path. Schema mirrors the auto-track
+        // event name + rail/productId/subscriptionId fields so
+        // cross-path funnels reconcile.
+        var props: [String: Any] = ["rail": rail.rawValue]
+        if let firstEnt = result.entitlements.first {
+            props["productId"] = firstEnt.source.productId
+            props["subscriptionId"] = firstEnt.source.subscriptionId
+        }
+        if result.idempotent_replay == true {
+            props["idempotent_replay"] = true
+        }
+        track("purchase.completed", properties: props)
         return result
     }
 
@@ -1018,7 +1157,7 @@ public final class Crossdeck: @unchecked Sendable {
             // but a paying customer keeps their entitlement.
             await entitlements.markRefreshFailed()
             throw outcome.error ?? CrossdeckError(
-                type: .apiError,
+                type: .internalError,
                 code: "get_entitlements_failed",
                 message: "/entitlements did not succeed."
             )
@@ -1081,7 +1220,7 @@ public final class Crossdeck: @unchecked Sendable {
         )
         guard outcome.kind == .success, let data = outcome.envelope?.body else {
             throw outcome.error ?? CrossdeckError(
-                type: .apiError,
+                type: .internalError,
                 code: "alias_failed",
                 message: "/identity/alias did not succeed."
             )
@@ -1098,15 +1237,22 @@ public final class Crossdeck: @unchecked Sendable {
     /// nothing for the current user (treat as "not yet known" —
     /// fall back to a refresh + paywall if needed).
     public func isEntitled(_ key: String) -> Bool {
+        // v1.4.0 Phase 2.3 — tombstone gate. During a `reset()`
+        // clear window, return false so paywall gates never observe
+        // the prior identified user's cached entitlements between
+        // caller invocation and actor work landing.
+        if isResetting { return false }
         guard let userId = identity.snapshotSync().developerUserId else { return false }
         return entitlements.isEntitledSync(key, for: userId)
     }
 
     /// Synchronous read of the full entitlement set for the current
-    /// user. Returns nil if no user is identified or the cache is
-    /// cold for them. Filters out expired entitlements (validUntil
-    /// in the past).
+    /// user. Returns nil if no user is identified, the cache is
+    /// cold for them, or a `reset()` clear is in flight (tombstone
+    /// gate). Filters out expired entitlements (validUntil in the
+    /// past).
     public func entitlementsForCurrentCustomer() -> [PublicEntitlement]? {
+        if isResetting { return nil }
         guard let userId = identity.snapshotSync().developerUserId else { return nil }
         return entitlements.entitlementsSync(for: userId)
     }
@@ -1123,15 +1269,65 @@ public final class Crossdeck: @unchecked Sendable {
     /// ID so the next anonymous session is fully unlinked from the
     /// prior identified user.
     ///
-    /// Fire-and-forget; never throws. Same Swift-idiomatic shape as
-    /// `track()` and `identify()`. Called after `stop()` → debug log
-    /// + no-op.
-    public func reset() {
+    /// v1.4.0 Phase 2.3 — bank-grade async reset with tombstone state.
+    ///
+    /// `reset()` is now `async` so the caller knows when the clear
+    /// is durably complete. During the clear window, the SDK's
+    /// `isEntitled` honours an `isResetting` tombstone and returns
+    /// `false` — closes the race between a logout button firing
+    /// `reset()` and the actor-internal clear completing, where
+    /// the paywall gate could otherwise read the prior identified
+    /// user's cached entitlements between caller invocation and
+    /// actor work landing.
+    ///
+    /// Breaking change vs v1.3.x: existing callers move from
+    ///   crossdeck.reset()
+    /// to
+    ///   await crossdeck.reset()
+    /// or use [[resetSync]] when the caller genuinely cannot
+    /// await (button handlers in non-async contexts).
+    public func reset() async {
         guard isStarted() else {
             options.debugLogger(.sdkConfigured, ["reset_dropped": "not_initialized"])
             return
         }
+        resettingLock.lock()
+        _isResetting = true
+        resettingLock.unlock()
+        defer {
+            resettingLock.lock()
+            _isResetting = false
+            resettingLock.unlock()
+        }
+
+        await identity.reset()
+        await entitlements.clear()
+        await superProperties.clear()
+        await breadcrumbs.clear()
+        options.debugLogger(.sdkConfigured, [:])
+    }
+
+    /// Synchronous reset path — kicks off the actor work in a
+    /// detached Task without awaiting. The tombstone flag still
+    /// flips synchronously so `isEntitled` returns `false`
+    /// IMMEDIATELY across the clear window. Use only when the
+    /// caller genuinely cannot await — production logout flows
+    /// should prefer `await reset()` so they know when teardown
+    /// is durably complete.
+    public func resetSync() {
+        guard isStarted() else {
+            options.debugLogger(.sdkConfigured, ["reset_dropped": "not_initialized"])
+            return
+        }
+        resettingLock.lock()
+        _isResetting = true
+        resettingLock.unlock()
         Task {
+            defer {
+                resettingLock.lock()
+                _isResetting = false
+                resettingLock.unlock()
+            }
             await identity.reset()
             await entitlements.clear()
             await superProperties.clear()
@@ -1167,7 +1363,7 @@ public final class Crossdeck: @unchecked Sendable {
     /// Mirrors Web/Node/RN.
     public func captureMessage(_ message: String, level: BreadcrumbLevel = .info) {
         let synthetic = CrossdeckError(
-            type: .unknown,
+            type: .internalError,
             code: "captured_message",
             message: message
         )
@@ -1290,7 +1486,43 @@ public final class Crossdeck: @unchecked Sendable {
         return started
     }
 
-    public func stop() {
+    /// v1.4.0 Phase 5.3 — bank-grade async teardown.
+    ///
+    /// `stop()` is now `async` so the caller knows when the
+    /// teardown is durably complete: queued events have been
+    /// persisted, background Tasks cancelled, observers removed.
+    ///
+    /// Breaking change vs v1.3.x: existing callers move from
+    ///   crossdeck.stop()
+    /// to
+    ///   await crossdeck.stop()
+    /// or use [[stopSync]] when the caller cannot await
+    /// (deinit / signal handlers / etc).
+    public func stop() async {
+        stopSharedSync()
+        // Best-effort durable persist BEFORE returning, so the
+        // caller knows queued events landed on disk. Cancels any
+        // in-flight retry timer cleanly.
+        await queue.persistAll()
+    }
+
+    /// Synchronous teardown — runs the same module-uninstall path
+    /// as `stop()` but does NOT await the queue persist. Use only
+    /// when the caller cannot await (test teardown, sync deinit
+    /// paths, signal handlers). Production logout / teardown
+    /// flows should prefer `await stop()`.
+    public func stopSync() {
+        stopSharedSync()
+        // Kick off the durable persist on a detached Task; the
+        // caller has chosen to forfeit the completion signal by
+        // using the sync entry point.
+        Task { await queue.persistAll() }
+    }
+
+    /// Shared sync teardown body — invoked by both `stop()` and
+    /// `stopSync()`. Drops observers, cancels stored Tasks,
+    /// uninstalls global hooks, releases the process-singleton.
+    private func stopSharedSync() {
         startedLock.lock()
         defer { startedLock.unlock() }
         started = false
@@ -1327,8 +1559,32 @@ public final class Crossdeck: @unchecked Sendable {
         #endif
         purchaseAutoTrack = nil
 
-        // Best-effort: persist anything in flight before relinquishing.
-        Task { await queue.persistAll() }
+        // v1.4.0 Phase 5.1 — drop every NSNotificationCenter
+        // observer this client installed. Pre-v1.4.0 the
+        // addObserver return values were discarded; start→stop→
+        // start cycles leaked N orphan observers and every
+        // didEnterBackground fired N stacked queue.flush() across
+        // dead Crossdecks.
+        uninstallLifecycleObservers()
+
+        // v1.4.0 Phase 5.2 — drop ErrorCapture's globally-installed
+        // hooks. Pre-v1.4.0 the captureHandler closure retained
+        // queue/identity/consent/breadcrumb actors of the stopped
+        // Crossdeck, so the next uncaught exception shipped through
+        // dead actors. ErrorCapture.uninstall() releases those
+        // strong refs.
+        ErrorCapture.shared.uninstall()
+
+        // v1.4.0 Phase 5.3 — cancel stored background Tasks.
+        // Cooperative cancellation lets URLSession abort the
+        // in-flight HTTP cleanly; the prior fire-and-forget Tasks
+        // would have kept running against actors of a stopped
+        // Crossdeck.
+        bootTask?.cancel()
+        bootTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+
         // Clear the process-singleton iff THIS instance is the one
         // currently published. If a newer client was already started
         // (e.g. test teardown sequence), don't clobber its slot.
@@ -1480,17 +1736,25 @@ public final class Crossdeck: @unchecked Sendable {
 
     private func installLifecycleObservers() {
         let center = NotificationCenter.default
+        // Defensive: if a prior install somehow accumulated tokens,
+        // drain them first. start() after stop() always lands here
+        // with an empty array; this guards against future refactors
+        // that might call install twice.
+        for token in lifecycleObserverTokens {
+            center.removeObserver(token)
+        }
+        lifecycleObserverTokens.removeAll()
 
         #if canImport(UIKit) && !os(watchOS)
-        center.addObserver(
+        lifecycleObserverTokens.append(center.addObserver(
             forName: UIApplication.willResignActiveNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.queue.persistAll() }
-        }
-        center.addObserver(
+        })
+        lifecycleObserverTokens.append(center.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: nil
@@ -1499,62 +1763,75 @@ public final class Crossdeck: @unchecked Sendable {
             // Best-effort flush before suspension. iOS gives a few
             // seconds of background time — enough to ship a small batch.
             Task { await self.queue.flush() }
-        }
+        })
         // willTerminate fires on user force-quit from the app switcher.
         // Without this observer, up to one batch of queued events
         // is lost. Sync persist (vs flush) is the contract here —
         // we want the events on disk before the process dies; the
         // next launch's queue rehydration ships them.
-        center.addObserver(
+        lifecycleObserverTokens.append(center.addObserver(
             forName: UIApplication.willTerminateNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.queue.persistAll() }
-        }
+        })
         #elseif canImport(AppKit)
         // Pure AppKit Mac apps land here (Mac Catalyst lands in
         // the UIKit branch above). Cover Cmd+Q + Cmd+H + system
         // shutdown so a Mac customer's queued events don't vanish
         // when the user closes the app.
-        center.addObserver(
+        lifecycleObserverTokens.append(center.addObserver(
             forName: NSApplication.willResignActiveNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.queue.persistAll() }
-        }
-        center.addObserver(
+        })
+        lifecycleObserverTokens.append(center.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.queue.persistAll() }
-        }
+        })
         #elseif canImport(WatchKit) && os(watchOS)
         // watchOS — extension-level lifecycle. WKExtension.shared
         // emits applicationWillResignActive when the user lowers
         // their wrist, applicationDidEnterBackground when the watch
         // face takes over.
-        center.addObserver(
+        lifecycleObserverTokens.append(center.addObserver(
             forName: WKExtension.applicationWillResignActiveNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.queue.persistAll() }
-        }
-        center.addObserver(
+        })
+        lifecycleObserverTokens.append(center.addObserver(
             forName: WKExtension.applicationDidEnterBackgroundNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.queue.flush() }
-        }
+        })
         #endif
+    }
+
+    /// Deregister every NotificationCenter observer this client
+    /// installed via [installLifecycleObservers]. Called from stop()
+    /// so start→stop→start leaves zero orphan observers — pre-v1.4.0
+    /// each cycle leaked N observers, each firing a stacked
+    /// `queue.flush()` against dead Crossdecks on every background.
+    private func uninstallLifecycleObservers() {
+        let center = NotificationCenter.default
+        for token in lifecycleObserverTokens {
+            center.removeObserver(token)
+        }
+        lifecycleObserverTokens.removeAll()
     }
 }

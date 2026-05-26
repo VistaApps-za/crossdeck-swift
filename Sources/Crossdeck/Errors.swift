@@ -29,14 +29,39 @@ public enum CrossdeckErrorType: String, Sendable, Codable {
     /// Rate limit hit. Honour the `Retry-After` header if present.
     case rateLimit = "rate_limit_error"
 
-    /// Server-side issue. Safe to retry with backoff.
-    case apiError = "api_error"
+    /// Server-side issue (5xx). Safe to retry with backoff. Aligned
+    /// with the backend's `ApiErrorType` wire vocabulary
+    /// (`backend/src/api/v1-errors.ts`) as of v1.4.0 — the prior
+    /// `.apiError` was a synthesised value that never appeared on
+    /// the wire. Pre-1.4.0 native pattern-matching on `.apiError`
+    /// would match a status-fallback case but never a real backend
+    /// envelope. Use `.internalError` to match backend 5xx
+    /// responses.
+    case internalError = "internal_error"
 
-    /// Caller's network refused the request. Browser equivalents:
-    /// `TypeError: Failed to fetch`, offline, CORS preflight refused.
+    /// SDK initialisation rejected (bad publishable key, missing
+    /// appId, environment mismatch). Mirrors the TS SDKs'
+    /// `configuration_error` type. Backend never emits this — it's
+    /// a client-side fail-fast surface.
+    case configurationError = "configuration_error"
+
+    /// Caller's network refused the request. Client-side only —
+    /// surfaces `URLError`s, offline state, captive portals.
+    /// Backend never emits this.
     case network = "network_error"
 
-    /// Catch-all for unmodelled failure modes.
+    /// **Deprecated as of v1.4.0** — backend never emits
+    /// `"api_error"` on the wire. Use `.internalError` for 5xx
+    /// responses. Retained for source-compat; new code MUST NOT
+    /// pattern-match on this case.
+    @available(*, deprecated, renamed: "internalError", message: "Backend never emits 'api_error'; use .internalError for 5xx responses (v1.4.0 wire vocabulary alignment).")
+    case apiError = "api_error"
+
+    /// **Deprecated as of v1.4.0** — backend never emits
+    /// `"unknown_error"` on the wire. Catch-all for unmodelled
+    /// failure modes; future versions will remove this and require
+    /// a specific type at every call site.
+    @available(*, deprecated, message: "Backend never emits 'unknown_error'; specific error types preferred (v1.4.0 wire vocabulary alignment).")
     case unknown = "unknown_error"
 }
 
@@ -157,8 +182,17 @@ private func typeForStatus(_ status: Int) -> CrossdeckErrorType {
     case 401:      return .authentication
     case 403:      return .permission
     case 429:      return .rateLimit
-    case 500...599: return .apiError
-    default:       return .unknown
+    // v1.4.0 — align fallback type with backend wire vocabulary.
+    // Backend's ApiErrorType uses "internal_error" for 5xx, never
+    // "api_error" (which used to be the SDK-only synthesised
+    // fallback that nothing on the wire matched).
+    case 500...599: return .internalError
+    // Fall back to internalError for unrecognised statuses too —
+    // the deprecated `.unknown` had no wire equivalent. A genuinely
+    // unmodelled status is conceptually a server-side failure from
+    // the caller's perspective; .internalError is the closest
+    // honest mapping.
+    default:       return .internalError
     }
 }
 

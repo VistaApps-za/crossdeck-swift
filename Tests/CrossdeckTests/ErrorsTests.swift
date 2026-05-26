@@ -31,7 +31,10 @@ final class ErrorsTests: XCTestCase {
             headerFields: nil
         )!
         let err = crossdeckErrorFrom(response: response, body: Data("<html>nope</html>".utf8))
-        XCTAssertEqual(err.type, .apiError)
+        // v1.4.0 wire vocabulary alignment: 5xx maps to .internalError
+        // (matches backend's ApiErrorType). Pre-1.4.0 was .apiError,
+        // which never appeared on the wire.
+        XCTAssertEqual(err.type, .internalError)
         XCTAssertEqual(err.statusCode, 500)
         XCTAssertNotNil(err.message)
     }
