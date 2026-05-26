@@ -607,11 +607,15 @@ public final class Crossdeck: @unchecked Sendable {
                             message: "/purchases/sync did not succeed.",
                             statusCode: outcome.envelope?.statusCode
                         )
+                        // debugLogger takes `[String: String]` — Stripe-style typed
+                        // debug payload, not free-form `Any`. statusCode is `Int?`
+                        // so we stringify (map + nil-coalesce to "n/a") rather than
+                        // forcing an `as Any` cast that the dict literal can't accept.
                         debugLogger(.sdkConfigured, [
                             "auto_purchase_sync_failed": "true",
                             "error_type": typed.type.rawValue,
                             "error_code": typed.code,
-                            "status_code": typed.statusCode as Any,
+                            "status_code": typed.statusCode.map(String.init) ?? "n/a",
                         ])
                         return .failure(typed)
                     },

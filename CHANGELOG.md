@@ -4,6 +4,32 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] — 2026-05-26
+
+Patch — second consumer compile fix surfaced by the same dogfood
+project as v1.4.2. With v1.4.2's `idempotentReplay` field in place,
+Swift's type-checker progressed further and pinned a separate
+issue in `Crossdeck.init(options:)`:
+
+The auto-tracked `purchases/sync` failure path's debug-logger call
+passed `typed.statusCode as Any` into a `[String: String]` dict
+literal. `debugLogger` is typed `(DebugSignal, [String: String]) ->
+Void` (Stripe-style structured-payload contract — no `Any` smuggled
+through the diagnostic surface). The dict literal rejected the
+`Any` cast and emitted two cascading errors.
+
+**Fixed:**
+
+- `Crossdeck.swift:614` — replace `typed.statusCode as Any` with
+  `typed.statusCode.map(String.init) ?? "n/a"`. `statusCode` is
+  `Int?` — when present we stringify, when absent we emit `"n/a"`
+  so the structured key is always populated.
+
+No behavioural change; the debug payload now strictly conforms to
+the typed shape the rest of the SDK already uses. Bundled
+contracts (`Resources/contracts.json`) regenerated so `bundledIn`
+stamps `@cross-deck/swift@1.4.3`.
+
 ## [1.4.2] — 2026-05-26
 
 Patch — fix consumer compile error caused by a missing field on
