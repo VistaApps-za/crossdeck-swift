@@ -62,6 +62,15 @@ public enum Environment: String, Sendable, Codable {
     case sandbox
 }
 
+/// Disambiguating alias for `Environment` — avoids the symbol clash
+/// every SwiftUI consumer hits the moment they `import Crossdeck`
+/// alongside `import SwiftUI` (SwiftUI ships its own `Environment`
+/// property wrapper). Prefer `CrossdeckEnvironment.production` /
+/// `.sandbox` in app code; the bare `Environment` name stays
+/// exported for back-compat and keeps working unqualified in files
+/// that don't `import SwiftUI`.
+public typealias CrossdeckEnvironment = Environment
+
 public struct CrossdeckOptions: Sendable {
     /// Crossdeck App ID issued in the dashboard
     /// (e.g. `app_ios_xxx`). Required. Goes on every batch envelope

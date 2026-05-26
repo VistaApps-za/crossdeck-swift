@@ -4,6 +4,40 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] — 2026-05-26
+
+Bank-grade SwiftUI integration polish. The Quickstart snippet now
+pastes and runs end-to-end without the developer having to
+hand-roll any wiring.
+
+**Added:**
+
+- **`EnvironmentValues.crossdeck`** — public SwiftUI environment key
+  shipped by the SDK. Consumers can now write
+  `ContentView().environment(\.crossdeck, cd)` at the App root and
+  `@Environment(\.crossdeck) private var cd` inside any view, with
+  zero `EnvironmentKey` boilerplate on the consumer side. Returns
+  `Crossdeck?` so the optional-chain pattern at every call site
+  keeps the host app crash-proof when the SDK didn't start. Lives
+  under `#if canImport(SwiftUI)` so non-Apple-platform resolves
+  still compile.
+- **`CrossdeckEnvironment`** — public typealias for the SDK's
+  `Environment` enum. Avoids the symbol collision every SwiftUI
+  consumer hits the moment they `import Crossdeck` alongside
+  `import SwiftUI` (SwiftUI's own `Environment` property wrapper).
+  The bare `Environment` name stays exported for back-compat and
+  keeps working unqualified in files that don't import SwiftUI.
+
+**Changed:**
+
+- Quickstart snippet (dashboard SDKs page → iOS) now uses
+  `CrossdeckEnvironment` in place of bare `Environment`, so the
+  copy-pasted boot code compiles cleanly inside a `@main App`
+  file that also imports SwiftUI.
+
+No behavioural change; both additions are purely ergonomic surface
+that closes the "first dogfood paste-and-run" friction loop.
+
 ## [1.4.3] — 2026-05-26
 
 Patch — second consumer compile fix surfaced by the same dogfood
