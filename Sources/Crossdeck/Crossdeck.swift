@@ -855,7 +855,17 @@ public final class Crossdeck: @unchecked Sendable {
         //      Even identifying with the same id wipes the cache —
         //      a tiny redundant rebuild is cheaper than a leak.
         identity.setDeveloperUserIdSync(userId)
-        entitlements.clearSync()
+        // v1.4.x bank-grade three-layer entitlement-cache isolation
+        // (matches Web/RN/Android):
+        //   (a) Physical key separation — flip the persistent storage
+        //       suffix to sha256(userId) so this user's blob lives
+        //       under `crossdeck:entitlements:<hash>`.
+        //   (b) Unconditional in-memory wipe — synchronously clears
+        //       the syncBox so a paywall gate reading isEntitled() on
+        //       the next line never sees the prior user's cache.
+        //   (c) Re-hydrate from the new slot in a detached Task
+        //       (matches the existing clearSync → reconcile pattern).
+        entitlements.setUserKeySync(userId)
         options.debugLogger(.sdkConfigured, ["user_id": userId])
 
         // Breadcrumb add is async (Breadcrumbs is an actor); fire
@@ -1301,7 +1311,11 @@ public final class Crossdeck: @unchecked Sendable {
         }
 
         await identity.reset()
-        await entitlements.clear()
+        // v1.4.x bank-grade logout-wipe — removes EVERY per-user
+        // entitlement slot on this device (matches Web/RN/Android
+        // reset() semantics). A shared device can never leave
+        // another user's entitlements readable post-logout.
+        await entitlements.clearAll()
         await superProperties.clear()
         await breadcrumbs.clear()
         options.debugLogger(.sdkConfigured, [:])

@@ -4,6 +4,35 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] — 2026-05-26
+
+Patch — close the dogfood-surfaced gap on the
+`per-user-cache-isolation` contract. v1.4.0 registered the contract
+with `applies_to: ["web", "react-native"]` because Swift + Android
+only shipped the in-memory wipe layer of the three-layer bank-grade
+isolation — physical per-user storage keys + the clearAll-via-index
+logout wipe were missing.
+
+**Implemented in v1.4.1 (now in the contract's applies_to list):**
+- `EntitlementCache.setUserKey(userId)` /
+  `setUserKeySync(userId)` flip the persistent storage suffix to
+  `sha256(userId)` so each user's blob lives under
+  `crossdeck:entitlements:<hash>` — a user-switch on a shared
+  device CANNOT cross-read prior user's data even if the
+  in-memory wipe is somehow skipped.
+- `EntitlementCache.clearAll()` reads the persisted suffix index
+  and wipes every per-user slot — used by `Crossdeck.reset()` so
+  a logout on a shared device cannot leave another user's
+  entitlements readable.
+- `Crossdeck.identify(userId)` calls `setUserKeySync(userId)`
+  instead of `clearSync()`.
+- `Crossdeck.reset()` (async) calls `clearAll()` instead of
+  `clear()`.
+
+No public API breakage; existing `identify()` / `reset()`
+semantics upgrade from "in-memory only" to the full three-layer
+contract.
+
 ## [1.4.0] — 2026-05-26
 
 **Bank-grade reconciliation release.** 6-pillar KPMG-style audit
