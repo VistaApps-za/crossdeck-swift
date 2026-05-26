@@ -4,6 +4,35 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] — 2026-05-26
+
+Patch — fix consumer compile error caused by a missing field on
+`PurchaseResult`. Surfaced when the first iOS dogfood project pulled
+v1.4.1 via SwiftPM and Xcode rejected the SDK source with two
+cascading errors in `syncPurchases(...)`:
+
+- `Value of type 'PurchaseResult' has no member 'idempotent_replay'`
+- `Cannot convert value of type 'Any' to expected dictionary value
+  type 'String'` (cascade — the Swift type-checker gives up on
+  `[String: Any]` inference once a member resolves unknown)
+
+**Fixed:**
+
+- `PurchaseResult` gains `public let idempotentReplay: Bool?` with
+  a `CodingKey` mapping the Swift-idiomatic camelCase property to
+  the wire's `idempotent_replay` (snake_case, set by the backend's
+  idempotency-response-cache middleware on cache-hit retries per
+  the `idempotency-key-deterministic` contract).
+- `syncPurchases(...)` now reads `result.idempotentReplay`. The
+  analytics event property key stays `idempotent_replay` on the
+  wire so dashboards joining `purchase.completed` across SDKs see
+  the same key Web/Node/RN/Android already emit.
+
+No new API surface; no behavioural change beyond the typed access
+unlocking what the runtime was already receiving. Bundled
+contracts (`Resources/contracts.json`) regenerated so `bundledIn`
+stamps `@cross-deck/swift@1.4.2`.
+
 ## [1.4.1] — 2026-05-26
 
 Patch — close the dogfood-surfaced gap on the

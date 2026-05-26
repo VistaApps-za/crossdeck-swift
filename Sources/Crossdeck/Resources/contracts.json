@@ -1,0 +1,534 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "generatedAt": "2026-05-26T15:15:10.182Z",
+  "sdk": "@cross-deck/swift",
+  "sdkVersion": "1.4.2",
+  "bundledIn": "@cross-deck/swift@1.4.2",
+  "count": 11,
+  "contracts": [
+    {
+      "id": "appaccounttoken-uuid-conformance",
+      "pillar": "revenue",
+      "status": "enforced",
+      "claim": "Swift SDK derives appAccountToken from developerUserId as a proper RFC 4122 UUID (passthrough if id is already a UUID; else UUID v5 from URL namespace + 'crossdeck:<id>'; else omit). StoreKit's numeric originalTransactionId rides in its own dedicated wire field. Backend validator rejects non-UUID appAccountToken with 400.",
+      "appliesTo": [
+        "swift",
+        "backend"
+      ],
+      "codeRef": [
+        "sdks/swift/Sources/Crossdeck/AppAccountTokenDerivation.swift",
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift",
+        "sdks/swift/Sources/Crossdeck/ServerEndpoints.swift",
+        "backend/src/api/v1-purchases-validation.ts"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AppAccountTokenDerivationTests.swift",
+          "name": "test_derive_returnsLowercaseUUIDDirectly_whenIdIsAlreadyUUID"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AppAccountTokenDerivationTests.swift",
+          "name": "test_derive_derivesUUIDv5_whenIdIsNotUUID"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AppAccountTokenDerivationTests.swift",
+          "name": "test_uuidV5_matchesRFCExample"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AppAccountTokenDerivationTests.swift",
+          "name": "test_numericStoreKitId_doesNotPassThroughAsAppAccountToken"
+        },
+        {
+          "file": "backend/tests/unit/v1-purchases-validation.test.ts",
+          "name": "rejects malformed appAccountToken"
+        },
+        {
+          "file": "backend/tests/unit/v1-purchases-validation.test.ts",
+          "name": "error message points pre-v1.4.0 SDKs at the new field"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.1",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "error-envelope-shape",
+      "pillar": "errors",
+      "status": "enforced",
+      "claim": "Every v1 REST endpoint returns errors in a Stripe-shape envelope: `{ error: { type, code, message, request_id } }` where `type` is one of authentication_error / permission_error / invalid_request_error / rate_limit_error / internal_error (the wire vocabulary in backend/src/api/v1-errors.ts ApiErrorType). HTTP status parity: invalid_request_error → 400, authentication_error → 401, permission_error → 403, rate_limit_error → 429, internal_error → 500. SDK-side clients parse this shape via `crossdeckErrorFromResponse` (Web/Node/RN) / `crossdeckErrorFrom(response:)` (Swift) / `crossdeckErrorFromResponse` (Android) and surface the request_id verbatim so support traces are end-to-end joinable. Firebase callable endpoints (managed-keys / dashboard auth) use the Firebase HttpsError envelope instead — this contract applies to REST /v1/* only.",
+      "appliesTo": [
+        "web",
+        "node",
+        "react-native",
+        "swift",
+        "android",
+        "backend"
+      ],
+      "codeRef": [
+        "backend/src/api/v1-errors.ts",
+        "sdks/web/src/errors.ts",
+        "sdks/node/src/errors.ts",
+        "sdks/react-native/src/errors.ts",
+        "sdks/swift/Sources/Crossdeck/Errors.swift",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/Errors.kt"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/ErrorsTests.swift",
+          "name": "test_errorEnvelope_fallsBackOnGarbageBody"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/ErrorsTests.swift",
+          "name": "test_errorEnvelope_reads_XRequestId_fallback"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/ErrorTypeWireVocabTest.kt",
+          "name": "backend 500 response parses to INTERNAL_ERROR"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 8 (codifies existing contract)",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "flush-interval-parity",
+      "pillar": "analytics",
+      "status": "enforced",
+      "claim": "Every Crossdeck SDK defaults its event-queue flush interval to 2000ms — the Stripe-adjacent industry norm. Pre-v1.4.0 the defaults disagreed (Web/Node 1500ms; RN/Swift/Android 5000ms), so cross-platform funnels saw events landing at different cadences. Per-instance override stays — call sites can still tune it freely.",
+      "appliesTo": [
+        "web",
+        "node",
+        "react-native",
+        "swift",
+        "android"
+      ],
+      "codeRef": [
+        "sdks/web/src/crossdeck.ts",
+        "sdks/node/src/crossdeck-server.ts",
+        "sdks/react-native/src/crossdeck.ts",
+        "sdks/swift/Sources/Crossdeck/EventQueue.swift",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/EventQueue.kt"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Sources/Crossdeck/EventQueue.swift",
+          "name": "flushIntervalMs: Int = 2_000"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/EventQueue.kt",
+          "name": "flushIntervalMs: Long = 2_000L"
+        },
+        {
+          "file": "sdks/web/src/crossdeck.ts",
+          "name": "options.eventFlushIntervalMs ?? 2000"
+        },
+        {
+          "file": "sdks/node/src/crossdeck-server.ts",
+          "name": "options.eventFlushIntervalMs ?? 2000"
+        },
+        {
+          "file": "sdks/react-native/src/crossdeck.ts",
+          "name": "options.eventFlushIntervalMs ?? 2000"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.3",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "idempotency-key-deterministic",
+      "pillar": "revenue",
+      "status": "enforced",
+      "claim": "syncPurchases() on every SDK derives a deterministic Idempotency-Key from the request body (UUID-shaped SHA-256 of `crossdeck:purchases/sync:<rail>:<jws|token>`). Same input -> same key. Backend short-circuits same-key-same-body retries by returning the cached response (status + body) with `idempotent_replay: true` flag in the body AND `Idempotent-Replayed: true` response header. Same-key-different-body returns 400 `idempotency_key_in_use`. 24-hour TTL matches Stripe. Cache only stores 2xx responses — 4xx/5xx pass through so callers can fix bugs and retry. Helper returns nil/throws on missing identifier (no silent random fallback). Cross-SDK parity is CI-pinned: deriveForPurchase('apple', 'eyJ.jws.sig') MUST equal 'a66b1640-efaf-bb4d-1261-6650033bf111' on every SDK.",
+      "appliesTo": [
+        "web",
+        "node",
+        "react-native",
+        "swift",
+        "android",
+        "backend"
+      ],
+      "codeRef": [
+        "sdks/web/src/idempotency-key.ts",
+        "sdks/web/src/crossdeck.ts",
+        "sdks/react-native/src/idempotency-key.ts",
+        "sdks/react-native/src/crossdeck.ts",
+        "sdks/node/src/idempotency-key.ts",
+        "sdks/node/src/crossdeck-server.ts",
+        "sdks/swift/Sources/Crossdeck/IdempotencyKey.swift",
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/IdempotencyKey.kt",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/Crossdeck.kt",
+        "backend/src/lib/idempotency-response-cache.ts",
+        "backend/src/api/v1-purchases.ts"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/web/tests/idempotency-key.test.ts",
+          "name": "cross-SDK oracle — apple JWS pins canonical vector"
+        },
+        {
+          "file": "sdks/web/tests/idempotency-key.test.ts",
+          "name": "is deterministic: same body twice -> identical key"
+        },
+        {
+          "file": "sdks/web/tests/idempotency-key.test.ts",
+          "name": "same identifier under different rails -> different keys"
+        },
+        {
+          "file": "sdks/web/tests/idempotency-key.test.ts",
+          "name": "never silently falls back to a random key on missing identifier"
+        },
+        {
+          "file": "sdks/react-native/tests/idempotency-key.test.ts",
+          "name": "is deterministic"
+        },
+        {
+          "file": "sdks/react-native/tests/idempotency-key.test.ts",
+          "name": "cross-SDK oracle — apple JWS pins canonical vector"
+        },
+        {
+          "file": "sdks/node/tests/idempotency-key.test.ts",
+          "name": "is deterministic"
+        },
+        {
+          "file": "sdks/node/tests/idempotency-key.test.ts",
+          "name": "rail namespacing prevents cross-rail collisions"
+        },
+        {
+          "file": "sdks/node/tests/idempotency-key.test.ts",
+          "name": "apple JWS produces the canonical pinned UUID across all 5 SDKs"
+        },
+        {
+          "file": "backend/tests/unit/idempotency-response-cache.test.ts",
+          "name": "is deterministic for the same input"
+        },
+        {
+          "file": "backend/tests/unit/idempotency-response-cache.test.ts",
+          "name": "injects idempotent_replay: true into a JSON object body"
+        },
+        {
+          "file": "backend/tests/unit/idempotency-response-cache.test.ts",
+          "name": "matches Stripe's 24-hour idempotency window"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/IdempotencyKeyTests.swift",
+          "name": "test_crossSdkOracle_appleJWS"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/IdempotencyKeyTests.swift",
+          "name": "test_railNamespacing_preventsCrossRailCollisions"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/IdempotencyKeyTests.swift",
+          "name": "test_missingIdentifier_returnsNil"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/IdempotencyKeyTest.kt",
+          "name": "cross-SDK oracle for apple JWS"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/IdempotencyKeyTest.kt",
+          "name": "rail namespacing prevents cross-rail collisions"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/IdempotencyKeyTest.kt",
+          "name": "missing identifier returns null - never silent random fallback"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.2.a + 2.2.b + 2.2.c",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "native-error-type-wire-vocab",
+      "pillar": "errors",
+      "status": "enforced",
+      "claim": "Swift and Android SDK CrossdeckErrorType enums align with the backend's ApiErrorType wire vocabulary. New cases: `internalError` / INTERNAL_ERROR (matches backend's `internal_error` for 5xx) and `configurationError` / CONFIGURATION_ERROR (parity with TS SDKs). Deprecated cases `apiError` / API_ERROR and `unknown` / UNKNOWN are kept for source-compat but never emitted by new code paths — the backend NEVER sent those tokens. typeForStatus fallback returns .internalError for 5xx and unrecognised statuses (pre-v1.4.0 returned the unreachable .apiError / .unknown). fromWire fallback also returns INTERNAL_ERROR for unknown tokens (was UNKNOWN).",
+      "appliesTo": [
+        "swift",
+        "android"
+      ],
+      "codeRef": [
+        "sdks/swift/Sources/Crossdeck/Errors.swift",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/Errors.kt"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/ErrorsTests.swift",
+          "name": "test_errorEnvelope_fallsBackOnGarbageBody"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/ErrorTypeWireVocabTest.kt",
+          "name": "backend 500 response parses to INTERNAL_ERROR"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/ErrorTypeWireVocabTest.kt",
+          "name": "5xx with no body falls back to INTERNAL_ERROR by status"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/ErrorTypeWireVocabTest.kt",
+          "name": "fromWire(internal_error) returns INTERNAL_ERROR"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/ErrorTypeWireVocabTest.kt",
+          "name": "fromWire(configuration_error) returns CONFIGURATION_ERROR"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/ErrorTypeWireVocabTest.kt",
+          "name": "deprecated API_ERROR + UNKNOWN still parse from wire for source-compat"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 6.1",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "per-user-cache-isolation",
+      "pillar": "entitlements",
+      "status": "enforced",
+      "claim": "Every identify(userId) switches the entitlement cache to a physically separate per-user storage slot — `crossdeck:entitlements:<sha256(userId)>` — and unconditionally wipes the in-memory snapshot. A user-switch on a shared device CANNOT cross-read a prior user's cached entitlements, even if the in-memory clear is somehow skipped, because the storage keys are physically separate. reset() wipes every per-user slot via the persisted index.",
+      "appliesTo": [
+        "web",
+        "react-native",
+        "swift",
+        "android"
+      ],
+      "codeRef": [
+        "sdks/web/src/entitlement-cache.ts",
+        "sdks/web/src/hash.ts",
+        "sdks/web/src/crossdeck.ts",
+        "sdks/react-native/src/entitlement-cache.ts",
+        "sdks/react-native/src/hash.ts",
+        "sdks/react-native/src/crossdeck.ts",
+        "sdks/swift/Sources/Crossdeck/EntitlementCache.swift",
+        "sdks/swift/Sources/Crossdeck/IdempotencyKey.swift",
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/EntitlementCache.kt",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/IdempotencyKey.kt",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/Crossdeck.kt"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/web/tests/entitlement-cache-isolation.test.ts",
+          "name": "identify(B) makes A's entitlements unreachable from in-memory"
+        },
+        {
+          "file": "sdks/web/tests/entitlement-cache-isolation.test.ts",
+          "name": "clearAll() removes every per-user storage key plus the index"
+        },
+        {
+          "file": "sdks/web/tests/entitlement-cache-isolation.test.ts",
+          "name": "a second cache instance reading A's storage suffix CANNOT see B's data"
+        },
+        {
+          "file": "sdks/react-native/tests/entitlement-cache-isolation.test.ts",
+          "name": "identify(B) makes A's entitlements unreachable from in-memory"
+        },
+        {
+          "file": "sdks/react-native/tests/entitlement-cache-isolation.test.ts",
+          "name": "removes every per-user storage key plus the index"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EntitlementCacheIsolationTests.swift",
+          "name": "test_identifyB_makesAEntitlementsUnreachable"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EntitlementCacheIsolationTests.swift",
+          "name": "test_identifiedWritesLandUnderPerUserSha256Key"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EntitlementCacheIsolationTests.swift",
+          "name": "test_clearAll_removesEveryPerUserStorageKeyPlusIndex"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/EntitlementCacheIsolationTest.kt",
+          "name": "identified writes land under per-user sha256 key"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/EntitlementCacheIsolationTest.kt",
+          "name": "identify B makes A entitlements unreachable from in-memory"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/EntitlementCacheIsolationTest.kt",
+          "name": "clearAll removes every per-user storage key plus the index"
+        },
+        {
+          "file": "sdks/android/crossdeck/src/test/kotlin/com/crossdeck/EntitlementCacheIsolationTest.kt",
+          "name": "a fresh cache bound to A's key CANNOT read B's blob"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 1.3 (web/RN) + dogfood-gap fix (swift + android)",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "purchase-finish-iff-success",
+      "pillar": "revenue",
+      "status": "enforced",
+      "claim": "Swift PurchaseAutoTrack calls transaction.finish() STRICTLY inside the success branch of /purchases/sync. A 5xx response leaves the StoreKit transaction unfinished so Apple's re-delivery on the next session keeps the purchase alive — mid-process-death plus a transient backend outage CANNOT silently lose revenue. Failures are persisted to PendingPurchaseQueue for bounded in-session retry (max 5, exp backoff 30s/1m/5m/30m/2h).",
+      "appliesTo": [
+        "swift"
+      ],
+      "codeRef": [
+        "sdks/swift/Sources/Crossdeck/PurchaseAutoTrack.swift",
+        "sdks/swift/Sources/Crossdeck/PendingPurchaseQueue.swift"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/PendingPurchaseQueueTests.swift",
+          "name": "test_shouldFinish_isTrueOnSuccess"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/PendingPurchaseQueueTests.swift",
+          "name": "test_shouldFinish_isFalseOnAnyFailure"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/PendingPurchaseQueueTests.swift",
+          "name": "test_recordFailure_persistsEntryWithBackoff"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/PendingPurchaseQueueTests.swift",
+          "name": "test_recordFailure_dropsEntryAtCap"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 1.2",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "super-property-merge-precedence",
+      "pillar": "analytics",
+      "status": "enforced",
+      "claim": "Every Crossdeck SDK merges event properties with the precedence device < super < caller (caller-supplied values win over registered super-properties, which win over auto-attached device info). Pre-v1.4.0 Swift had it INVERTED (super < device < caller — device clobbered super), so a `register('plan', 'pro')` super-property was silently overridden by auto-attached device fields whenever keys collided. Cross-SDK funnel queries on super-property keys returned different answers per platform.",
+      "appliesTo": [
+        "swift"
+      ],
+      "codeRef": [
+        "sdks/swift/Sources/Crossdeck/EventPropertyMerge.swift",
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EventPropertyMergeTests.swift",
+          "name": "test_super_overrides_device"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EventPropertyMergeTests.swift",
+          "name": "test_caller_overrides_super"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EventPropertyMergeTests.swift",
+          "name": "test_full_precedence_chain"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/EventPropertyMergeTests.swift",
+          "name": "test_matchesWebNodeRNPrecedence"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.2",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "swift-async-lifecycle",
+      "pillar": "lifecycle",
+      "status": "enforced",
+      "claim": "Swift `Crossdeck.reset()` and `Crossdeck.stop()` are `async` so the caller knows when teardown is durably complete. reset() awaits identity / entitlements / super-properties / breadcrumbs clear AND flips an `isResetting` tombstone synchronously at entry so `isEntitled` returns false IMMEDIATELY across the clear window (closes the race between a logout button firing reset() and the actor-internal clear completing). stop() awaits queue.persistAll() AND cancels stored boot + heartbeat Tasks (pre-v1.4.0 they ran fire-and-forget against actors of stopped clients). Sync escape hatches `resetSync()` + `stopSync()` exist for callers that cannot await — used by tests in defer blocks.",
+      "appliesTo": [
+        "swift"
+      ],
+      "codeRef": [
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AsyncLifecycleTests.swift",
+          "name": "test_reset_tombstone_flipsBeforeAsyncCompletion"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AsyncLifecycleTests.swift",
+          "name": "test_isEntitled_returnsFalseDuringResetWindow"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AsyncLifecycleTests.swift",
+          "name": "test_stop_isAsync_andAwaitsDurablePersist"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AsyncLifecycleTests.swift",
+          "name": "test_stopSync_runsTeardown_synchronously"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/AsyncLifecycleTests.swift",
+          "name": "test_stop_cancelsStoredBackgroundTasks"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.3 + 5.3",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "swift-lifecycle-clean-teardown",
+      "pillar": "lifecycle",
+      "status": "enforced",
+      "claim": "Swift Crossdeck.stop() deregisters every NSNotificationCenter observer it installed via installLifecycleObservers (lifecycleObserverTokens drained with removeObserver) AND calls ErrorCapture.shared.uninstall() so the global exception handler releases its references to the stopped client. Pre-v1.4.0 every start→stop→start cycle leaked N orphan observers and every uncaught exception after stop() shipped through dead actors. Apple platform caveat: NSSetUncaughtExceptionHandler has no removal API; uninstall() restores the chained prior handler so exceptions continue reaching it post-stop().",
+      "appliesTo": [
+        "swift"
+      ],
+      "codeRef": [
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift",
+        "sdks/swift/Sources/Crossdeck/ErrorCapture.swift"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/LifecycleObserverCleanupTests.swift",
+          "name": "test_startedClient_capturesObserverTokens"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/LifecycleObserverCleanupTests.swift",
+          "name": "test_stop_clearsAllObserverTokens"
+        },
+        {
+          "file": "sdks/swift/Tests/CrossdeckTests/LifecycleObserverCleanupTests.swift",
+          "name": "test_consecutiveLifecycle_doesNotAccumulateAcrossInstances"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 5.1 + 5.2",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    },
+    {
+      "id": "sync-purchases-funnel-parity",
+      "pillar": "analytics",
+      "status": "enforced",
+      "claim": "Manual syncPurchases() emits a `purchase.completed` analytics event on success across ALL SDKs (Web / Node / RN / Swift / Android). Pre-v1.4.0 only Swift/Android auto-track emitted it — Web/Node/RN manual calls + Swift/Android manual calls fired ZERO analytics. Schema mirrors the auto-track event name + rail/productId/subscriptionId so cross-platform funnels reconcile on every payment path. When the backend short-circuits via the v1.4.0 idempotency cache, the event also carries `idempotent_replay: true`.",
+      "appliesTo": [
+        "web",
+        "node",
+        "react-native",
+        "swift",
+        "android"
+      ],
+      "codeRef": [
+        "sdks/web/src/crossdeck.ts",
+        "sdks/node/src/crossdeck-server.ts",
+        "sdks/react-native/src/crossdeck.ts",
+        "sdks/swift/Sources/Crossdeck/Crossdeck.swift",
+        "sdks/android/crossdeck/src/main/kotlin/com/crossdeck/Crossdeck.kt"
+      ],
+      "testRef": [
+        {
+          "file": "sdks/web/tests/sync-purchases-funnel.test.ts",
+          "name": "emits purchase.completed after a successful sync"
+        },
+        {
+          "file": "sdks/web/tests/sync-purchases-funnel.test.ts",
+          "name": "carries idempotent_replay=true when backend replied from cache"
+        }
+      ],
+      "registeredAt": "2026-05-26",
+      "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.5",
+      "bundledIn": "@cross-deck/swift@1.4.2"
+    }
+  ]
+}

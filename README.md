@@ -2,18 +2,28 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.2.0 — full bank-grade parity.** Modeled line-for-line
-> on the Web/Node/React Native SDKs. v1.2.0 adds **auto-tracking**
-> (sessions, screen views, tap autocapture) so journeys appear in
-> your dashboard with zero instrumentation, **PrivacyInfo.xcprivacy**
-> bundled in the SDK (Apple requires this since May 2024 — without
-> it your app is rejected at submit), **MetricKit perf vitals**
-> (hang detection, cold launch time, CPU exceptions), **network-
-> edge flush** for offline→online recovery, **automatic StoreKit 2
-> transaction observation**, and **deep-link / push attribution
-> helpers**. v1.2.0 made `track`, `identify`, `reset` non-throwing.
-> See [`CHANGELOG.md`](./CHANGELOG.md) for full details and a
-> compatibility table.
+> **Status: v1.4.1 — full bank-grade parity.** Modeled line-for-line
+> on the Web/Node/React Native SDKs. v1.4.0 closed the bank-grade
+> reconciliation pillars — deterministic Idempotency-Key on every
+> purchase sync, wire-vocab alignment on error types, per-event
+> idempotency on the queue. v1.4.1 adds **per-user entitlement
+> cache isolation** (physical SHA-256-keyed storage slot per user
+> + unconditional in-memory wipe + logout-grade `clearAll()`) so a
+> shared-device user switch cannot cross-read a prior user's
+> entitlements. v1.5.0 SDK-suite work extends this Swift SDK with
+> the **`CrossdeckContracts`** typed registry + **`reportContractFailure(_:)`**
+> helper for emitting contract-test failures back to Crossdeck via
+> the standard `track()` pipeline.
+>
+> The v1.2.0 base shipped **auto-tracking** (sessions, screen views,
+> tap autocapture), **PrivacyInfo.xcprivacy** (Apple's required-reason
+> manifest — without it your app is rejected at submit), **MetricKit
+> perf vitals** (hang detection, cold launch time, CPU exceptions),
+> **network-edge flush** for offline→online recovery, **automatic
+> StoreKit 2 transaction observation**, **deep-link / push attribution
+> helpers**, and non-throwing `track` / `identify` / `reset`.
+>
+> See [`CHANGELOG.md`](./CHANGELOG.md) for full per-release details.
 
 ## Three pillars
 
@@ -349,6 +359,62 @@ HTTP aborts cleanly.
 - **Default-GRANT consent.** Analytics + errors both on out of the
   box — matches the Web/Node/RN platform contract. Wire
   `setConsent(...)` for an opt-out flow (cookie banner, EU age gate).
+
+### `CrossdeckContracts` — typed access to the bundled contract registry
+
+The SDK ships the full bank-grade contract registry as an indexed JSON resource inside the SPM bundle. Query it at runtime:
+
+```swift
+import Crossdeck
+
+for contract in CrossdeckContracts.all() {
+    print("[crossdeck] \(contract.id) (\(contract.pillar.rawValue))")
+}
+
+guard let isolation = CrossdeckContracts.byId("per-user-cache-isolation"),
+      isolation.status == .enforced else {
+    fatalError("entitlement isolation contract is not enforced — refusing to start")
+}
+
+CrossdeckContracts.byPillar(.entitlements)
+CrossdeckContracts.withStatus(.proposed)
+CrossdeckContracts.findByTestName("test_identifyB_makesAEntitlementsUnreachable")
+CrossdeckContracts.sdkVersion       // "1.4.1"
+CrossdeckContracts.bundledIn        // "@cross-deck/swift@1.4.1"
+```
+
+The `Contract` struct + `ContractPillar`/`ContractStatus`/`ContractAppliesTo` enums are public. The binary-stability promise (which fields are guaranteed across patch/minor releases) is documented inline on `Contracts.swift` and in the monorepo's [`contracts/README.md`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md).
+
+### `cd.reportContractFailure(_:)` — surface contract test failures
+
+When a contract test asserts and fails — in your CI, a dogfood run, or a customer integration test — fire a typed `crossdeck.contract_failed` event through the standard `track(_:)` pipeline:
+
+```swift
+cd.reportContractFailure(.init(
+    contractId: "per-user-cache-isolation",
+    failureReason: "expected isolation across user switch, got cross-read",
+    runContext: ProcessInfo.processInfo.environment["CI"] != nil ? .ci : .dogfood,
+    runId: ProcessInfo.processInfo.environment["GITHUB_RUN_ID"] ?? UUID().uuidString,
+    testRef: .init(
+        file: "EntitlementCacheIsolationTests.swift",
+        name: "test_identifyB_makesAEntitlementsUnreachable"
+    )
+))
+```
+
+No new endpoint, no special ingest path — the event lands in the same pipeline every other `track(_:)` call does. It surfaces immediately in the Crossdeck dashboard's live event feed, the breakdown chart (group by `contract_id`, `sdk_platform`), and any alert rule with `event = crossdeck.contract_failed`.
+
+Properties stamped on the wire:
+
+| Property | Source |
+|----------|--------|
+| `contract_id` | caller |
+| `sdk_version`, `sdk_platform` | auto-stamped (Swift ships `sdk_platform: "swift"`) |
+| `failure_reason`, `run_context`, `run_id` | caller |
+| `test_file`, `test_name` | set when `testRef` is provided |
+| arbitrary keys | merged from `input.extra` (reserved keys win) |
+
+`runContext` is one of `.ci`, `.dogfood`, `.customerApp` — the wire vocabulary matches the other SDKs so dashboards collapse cleanly across platforms. For an `XCTestObservation`-driven test reporter that emits one event per failed contract test, see [`contracts/README.md` § Reporting contract failures](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md#reporting-contract-failures-back-to-crossdeck).
 
 ## Troubleshooting
 

@@ -78,10 +78,27 @@ public struct EntitlementsListResponse: Sendable, Codable, Equatable {
 
 /// `POST /purchases/sync` response. Carries the projected
 /// entitlement set so the SDK can warm its cache immediately.
+///
+/// `idempotentReplay` is set to `true` when the backend short-
+/// circuits a same-key-same-body retry from its 24h Idempotency-Key
+/// response cache (Stripe-style replay). Surface it on the
+/// `purchase.completed` analytics event so dashboards can split
+/// "fresh purchase" from "retried purchase" in funnels. The wire
+/// key is `idempotent_replay` (snake_case, set by the backend's
+/// idempotency-response-cache middleware) — CodingKey bridges to
+/// the Swift-idiomatic camelCase property name.
 public struct PurchaseResult: Sendable, Codable, Equatable {
     public let crossdeckCustomerId: String
     public let env: Environment
     public let entitlements: [PublicEntitlement]
+    public let idempotentReplay: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case crossdeckCustomerId
+        case env
+        case entitlements
+        case idempotentReplay = "idempotent_replay"
+    }
 }
 
 /// `GET /sdk/heartbeat` response. Used to flip the dashboard

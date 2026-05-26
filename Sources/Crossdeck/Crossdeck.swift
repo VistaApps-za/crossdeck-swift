@@ -646,6 +646,34 @@ public final class Crossdeck: @unchecked Sendable {
     /// Swift's compile-time enforcement makes that pattern hostile —
     /// every call site has to wrap in `try?`. The validation INTENT
     /// is identical; only the signalling mechanism is Swift-idiomatic.
+    /// Emit `crossdeck.contract_failed` with the canonical property
+    /// shape — `contract_id`, `sdk_version`, `sdk_platform`,
+    /// `failure_reason`, `run_context`, `run_id`. Goes through the
+    /// standard `track(_:properties:)` pipeline, so no new endpoint
+    /// or special path is involved. Wire from a test hook
+    /// (XCTestObservation), dogfood failure path, or customer
+    /// contract-verification harness — see `contracts/README.md`.
+    public func reportContractFailure(_ input: ContractFailureInput) {
+        var properties: [String: Any] = [
+            "contract_id": input.contractId,
+            "sdk_version": SDK.version,
+            "sdk_platform": "swift",
+            "failure_reason": input.failureReason,
+            "run_context": input.runContext.rawValue,
+            "run_id": input.runId,
+        ]
+        if let testRef = input.testRef {
+            properties["test_file"] = testRef.file
+            properties["test_name"] = testRef.name
+        }
+        if let extra = input.extra {
+            for (key, value) in extra where properties[key] == nil {
+                properties[key] = value
+            }
+        }
+        track("crossdeck.contract_failed", properties: properties)
+    }
+
     public func track(_ name: String, properties: [String: Any]? = nil) {
         guard isStarted() else {
             options.debugLogger(.sdkConfigured, ["track_dropped": "not_initialized", "event": name])
@@ -1128,7 +1156,12 @@ public final class Crossdeck: @unchecked Sendable {
             props["productId"] = firstEnt.source.productId
             props["subscriptionId"] = firstEnt.source.subscriptionId
         }
-        if result.idempotent_replay == true {
+        if result.idempotentReplay == true {
+            // Keep the wire-shape snake_case key on the analytics event
+            // so dashboards joining purchase.completed across SDKs see
+            // the same property name (Web/Node/RN all emit
+            // `idempotent_replay`). The struct field is camelCase per
+            // Swift convention; the event property stays wire-canonical.
             props["idempotent_replay"] = true
         }
         track("purchase.completed", properties: props)
