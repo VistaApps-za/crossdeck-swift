@@ -93,11 +93,13 @@ private struct ContractsBundle: Decodable {
 /// per-SDK shape exactly — the Crossdeck dashboard joins
 /// `crossdeck.contract_failed` events across every SDK on
 /// `contract_id`, so the property bag has to agree byte-for-byte.
-// `extra` carries `[String: Any]` (matches the `track()` API shape),
-// which can't be Sendable. The struct is consumed synchronously by
-// `reportContractFailure(_:)` on the call site, so cross-actor
-// passing isn't needed.
-public struct ContractFailureInput {
+///
+/// SCHEMA-LOCK: this struct's field set is exhaustively named. No
+/// free-form `extra: [String: Any]?` — the schema-lock contract at
+/// `contracts/diagnostics/contract-failed-payload-schema-lock.json`
+/// forbids unbounded fields. Adding a field requires a PR that
+/// amends the contract first, then the public struct.
+public struct ContractFailureInput: Sendable {
     /// Where the failure was observed.
     public enum RunContext: String, Sendable {
         case ci
@@ -107,15 +109,18 @@ public struct ContractFailureInput {
 
     /// Stable contract id (`per-user-cache-isolation` etc.).
     public let contractId: String
-    /// Human-readable failure reason — the assertion message.
+    /// Short categorical-ish label — the SDK convention is to keep
+    /// this under 128 chars and stable across runs (so dashboards can
+    /// group). Never an end-user-supplied string.
     public let failureReason: String
     public let runContext: RunContext
     /// Stable identifier for this verification run.
     public let runId: String
     /// Optional pointer back to the failing test, for triage.
     public let testRef: TestRefSnapshot?
-    /// Optional extra properties merged into the event payload.
-    public let extra: [String: Any]?
+    /// Optional coarse device class, e.g. "iPhone", "iPad", "Mac",
+    /// "simulator". A categorical bucket, not a device identifier.
+    public let deviceClass: String?
 
     public struct TestRefSnapshot: Sendable, Hashable {
         public let file: String
@@ -132,14 +137,14 @@ public struct ContractFailureInput {
         runContext: RunContext,
         runId: String,
         testRef: TestRefSnapshot? = nil,
-        extra: [String: Any]? = nil
+        deviceClass: String? = nil
     ) {
         self.contractId = contractId
         self.failureReason = failureReason
         self.runContext = runContext
         self.runId = runId
         self.testRef = testRef
-        self.extra = extra
+        self.deviceClass = deviceClass
     }
 }
 

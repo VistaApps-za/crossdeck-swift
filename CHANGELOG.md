@@ -4,6 +4,15 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.10] — 2026-05-27
+
+`Crossdeck.reportContractFailure(_:)` is now single-fire to a
+dedicated reliability endpoint instead of the customer's `track(_:)`
+pipeline. Independent-controller flow per Privacy Policy §6;
+schema-locked by `contracts/diagnostics/contract-failed-payload-
+schema-lock.json`. `ContractFailureInput.extra` removed (schema-lock
+forbids unbounded fields); `ContractFailureInput.deviceClass` added.
+
 ## [1.4.9] — 2026-05-27
 
 `.crossdeckTap("Name")` — explicit tap-label bolt-on for SwiftUI

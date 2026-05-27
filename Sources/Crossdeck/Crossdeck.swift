@@ -660,15 +660,21 @@ public final class Crossdeck: @unchecked Sendable {
     /// Swift's compile-time enforcement makes that pattern hostile —
     /// every call site has to wrap in `try?`. The validation INTENT
     /// is identical; only the signalling mechanism is Swift-idiomatic.
-    /// Emit `crossdeck.contract_failed` with the canonical property
-    /// shape — `contract_id`, `sdk_version`, `sdk_platform`,
-    /// `failure_reason`, `run_context`, `run_id`. Goes through the
-    /// standard `track(_:properties:)` pipeline, so no new endpoint
-    /// or special path is involved. Wire from a test hook
-    /// (XCTestObservation), dogfood failure path, or customer
-    /// contract-verification harness — see `contracts/README.md`.
+    /// Emit `crossdeck.contract_failed` to the Crossdeck reliability
+    /// endpoint — single-fire, one-way, never visible in the
+    /// customer's dashboard. Goes over a dedicated HTTP path with the
+    /// reliability publishable key embedded at build time; the
+    /// customer's `track()` pipeline never carries `crossdeck.*`
+    /// events. This is the independent-controller flow described in
+    /// Privacy Policy §6 ("Flow B"). The wire shape is fixed by the
+    /// schema-lock contract at
+    /// `contracts/diagnostics/contract-failed-payload-schema-lock.json`.
+    ///
+    /// Wire from a test hook (XCTestObservation), dogfood failure
+    /// path, or customer contract-verification harness — see
+    /// `contracts/README.md`.
     public func reportContractFailure(_ input: ContractFailureInput) {
-        var properties: [String: Any] = [
+        var payload: [String: String] = [
             "contract_id": input.contractId,
             "sdk_version": SDK.version,
             "sdk_platform": "swift",
@@ -677,15 +683,13 @@ public final class Crossdeck: @unchecked Sendable {
             "run_id": input.runId,
         ]
         if let testRef = input.testRef {
-            properties["test_file"] = testRef.file
-            properties["test_name"] = testRef.name
+            payload["test_file"] = testRef.file
+            payload["test_name"] = testRef.name
         }
-        if let extra = input.extra {
-            for (key, value) in extra where properties[key] == nil {
-                properties[key] = value
-            }
+        if let deviceClass = input.deviceClass {
+            payload["device_class"] = deviceClass
         }
-        track("crossdeck.contract_failed", properties: properties)
+        _DiagnosticTelemetry.send(payload: payload, session: options.urlSession)
     }
 
     public func track(_ name: String, properties: [String: Any]? = nil) {

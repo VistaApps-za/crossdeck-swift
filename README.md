@@ -12,8 +12,9 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 > shared-device user switch cannot cross-read a prior user's
 > entitlements. v1.5.0 SDK-suite work extends this Swift SDK with
 > the **`CrossdeckContracts`** typed registry + **`reportContractFailure(_:)`**
-> helper for emitting contract-test failures back to Crossdeck via
-> the standard `track()` pipeline.
+> helper for emitting contract-test failures back to Crossdeck over
+> a dedicated reliability channel (Privacy Policy §6, "Flow B") —
+> never via the customer's `track()` pipeline.
 >
 > The v1.2.0 base shipped **auto-tracking** (sessions, screen views,
 > tap autocapture), **PrivacyInfo.xcprivacy** (Apple's required-reason
@@ -412,7 +413,9 @@ Properties stamped on the wire:
 | `sdk_version`, `sdk_platform` | auto-stamped (Swift ships `sdk_platform: "swift"`) |
 | `failure_reason`, `run_context`, `run_id` | caller |
 | `test_file`, `test_name` | set when `testRef` is provided |
-| arbitrary keys | merged from `input.extra` (reserved keys win) |
+| `device_class` | optional, set by caller (categorical bucket — e.g. `"iPhone"`, `"iPad"`, `"Mac"`, `"simulator"`) |
+
+The wire shape is schema-locked at [`contracts/diagnostics/contract-failed-payload-schema-lock.json`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/diagnostics/contract-failed-payload-schema-lock.json); per-SDK assertion tests gate it on every release. Free-form `extra` keys are not accepted — adding a field requires an amendment to the schema-lock contract first.
 
 `runContext` is one of `.ci`, `.dogfood`, `.customerApp` — the wire vocabulary matches the other SDKs so dashboards collapse cleanly across platforms. For an `XCTestObservation`-driven test reporter that emits one event per failed contract test, see [`contracts/README.md` § Reporting contract failures](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md#reporting-contract-failures-back-to-crossdeck).
 
