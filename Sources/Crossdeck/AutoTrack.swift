@@ -462,10 +462,18 @@ private let screenViewClassDenylist: Set<String> = [
     "_UIAlertControllerTextFieldViewController",
     "UIPresentationController",
     "UIPredictionViewController",
+    // SwiftUI's internal UINavigationController subclass that backs
+    // NavigationStack. Apple's name; on the dashboard this would
+    // surface as "UIKitNavigationController" — meaningless to the
+    // developer. The actual destination is captured by
+    // `.crossdeckScreen("Name")` on the View that's pushed.
+    "UIKitNavigationController",
 ]
 
-/// Class-name prefixes that indicate a framework / internal type.
-/// We skip these to keep the dashboard journey readable.
+/// Class-name prefixes / substrings that indicate a framework /
+/// internal type. We skip these to keep the dashboard journey
+/// readable — these classes have no human-meaningful name a
+/// developer would recognise.
 private let screenViewClassPrefixDenylist: [String] = [
     "_UI",                  // Apple private UIKit
     "_SwiftUI",             // SwiftUI internal types
@@ -473,6 +481,21 @@ private let screenViewClassPrefixDenylist: [String] = [
     "_TtCV7SwiftUI",        // ditto
     "UIHostingController",  // SwiftUI host
     "UIRemoteKeyboard",
+]
+
+/// Class-name substrings indicating a SwiftUI hosting controller.
+/// Anything matching is a framework wrapper around a real View —
+/// the dashboard shouldn't show "PresentationHostingController<AnyView>"
+/// or "NavigationStackHostingController<AnyView>"; those mean nothing
+/// to the developer. The real screen is captured by
+/// `.crossdeckScreen("Name")` on the destination View.
+///
+/// Substring rather than prefix because SwiftUI prepends a
+/// type-mangled namespace on these in some configurations
+/// (e.g. `SwiftUI.PresentationHostingController<…>`) — substring
+/// catches both forms.
+private let screenViewClassSubstringDenylist: [String] = [
+    "HostingController",    // *HostingController — SwiftUI hosts
 ]
 
 /// Accessibility-identifier convention for opt-out. Mirrors
@@ -549,6 +572,9 @@ extension UIViewController {
         for prefix in screenViewClassPrefixDenylist where className.hasPrefix(prefix) {
             return
         }
+        for substring in screenViewClassSubstringDenylist where className.contains(substring) {
+            return
+        }
 
         // Skip presented system alerts / sheets we shouldn't track.
         if self is UIAlertController { return }
@@ -599,13 +625,18 @@ extension UIWindow {
         if hit is UITextField || hit is UITextView { return }
 
         // Walk up to find a view with a meaningful accessibility
-        // signal. SwiftUI button hosting views often have no label
-        // themselves but inherit from their parent's accessibility
-        // configuration. We look up to 4 ancestors.
+        // signal. SwiftUI's button hosting tree can be deep —
+        // `Button("Create Image") { … }` puts the accessibility
+        // label on the merged Button view, which is often 8-12
+        // UIView hops above the visible Text / Image the user
+        // physically tapped. The old 4-ancestor cap missed it
+        // entirely and emitted unlabelled element.clicked events.
+        // 16 is high enough for current iOS 16+ SwiftUI hierarchies
+        // and still bounded so a runaway view tree can't spin.
         var view: UIView? = hit
         var depth = 0
         var labelSource: UIView?
-        while let v = view, depth < 4 {
+        while let v = view, depth < 16 {
             if (v.accessibilityLabel?.isEmpty == false) ||
                (v.accessibilityIdentifier?.isEmpty == false) {
                 labelSource = v
@@ -614,7 +645,17 @@ extension UIWindow {
             view = v.superview
             depth += 1
         }
+        // SwiftUI Button("Text") rendering also commonly puts the
+        // visible text on a UILabel inside the touched view's
+        // descendants — and the merged accessibility label may be
+        // set on a SIBLING, not an ancestor. Descend up to 6 levels
+        // looking for a UILabel with text or a descendant with an
+        // accessibilityLabel. Bank-grade fallback so a tapped
+        // button always has SOMETHING to render on the dashboard.
         let primary = labelSource ?? hit
+        let resolvedText: String? = (labelSource?.accessibilityLabel?.isEmpty == false)
+            ? labelSource?.accessibilityLabel
+            : findDescendantLabel(hit, depth: 0)
 
         // Skip opt-out.
         if isOptedOutFromAutoTrack(primary) { return }
@@ -634,11 +675,43 @@ extension UIWindow {
         if let id = primary.accessibilityIdentifier, !id.isEmpty {
             props["accessibilityId"] = String(id.prefix(128))
         }
-        if let label = primary.accessibilityLabel, !label.isEmpty {
+        // Privacy guard before adopting the resolved text — same PII
+        // substring check the labelIndicatesPII helper applies to
+        // accessibilityLabel. A descendant UILabel might carry text
+        // like "Card number" that we never want to ship.
+        let candidate = resolvedText?.isEmpty == false ? resolvedText
+                      : (primary.accessibilityLabel?.isEmpty == false ? primary.accessibilityLabel : nil)
+        if let label = candidate, !textIndicatesPII(label) {
             props["accessibilityLabel"] = String(label.prefix(128))
         }
         AutoTracker.shared.emit("element.clicked", props)
     }
+}
+
+/// Descend into the touched view's subtree looking for a UILabel
+/// with text or any view carrying an accessibility label. SwiftUI's
+/// merged-accessibility model often puts the human-readable label
+/// on a sibling / descendant of the hit-test target rather than an
+/// ancestor; this is the fallback the ancestor walk-up reaches for
+/// when SwiftUI's tree doesn't propagate the label upward.
+///
+/// Bounded depth (6) plus a hard subtree-node cap so a list cell
+/// with thousands of nested layout views can't spin. First match
+/// wins — preference is the closest, shallowest descendant.
+private func findDescendantLabel(_ view: UIView, depth: Int) -> String? {
+    if depth > 6 { return nil }
+    if let label = view.accessibilityLabel, !label.isEmpty {
+        return label
+    }
+    if let lbl = view as? UILabel, let text = lbl.text, !text.isEmpty {
+        return text
+    }
+    for sub in view.subviews {
+        if let found = findDescendantLabel(sub, depth: depth + 1) {
+            return found
+        }
+    }
+    return nil
 }
 
 // MARK: - Helpers
@@ -665,7 +738,16 @@ private func labelIndicatesPII(_ view: NSObject) -> Bool {
     let label = (view as? UIView)?.accessibilityLabel?.lowercased()
         ?? (view as? UIControl)?.accessibilityLabel?.lowercased()
     guard let label, !label.isEmpty else { return false }
-    for needle in piiLabelSubstrings where label.contains(needle) {
+    return textIndicatesPII(label)
+}
+
+/// String-level PII guard. Reused for both the ancestor-walked
+/// accessibilityLabel and the descendant-found UILabel.text, so a
+/// password field's visible text or a card-number label never lands
+/// on the wire.
+private func textIndicatesPII(_ text: String) -> Bool {
+    let lowered = text.lowercased()
+    for needle in piiLabelSubstrings where lowered.contains(needle) {
         return true
     }
     return false

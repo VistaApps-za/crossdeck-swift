@@ -4,6 +4,64 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.7] — 2026-05-26
+
+Auto-track tap labels now resolve on SwiftUI buttons — closes the
+"Clicked an element" gap that buried real CTAs on the dashboard.
+
+**Fixed:**
+
+- The `UIWindow.sendEvent` tap-capture walked up only 4 ancestors
+  looking for an `accessibilityLabel`. SwiftUI's button hosting tree
+  is much deeper — `Button("Create Image") { … }` puts the merged
+  accessibility label on a view 8–12 hops above the touched
+  `Text` / `Image`. Bumped the walk-up to 16 ancestors so the label
+  is reachable.
+- New descendant-search fallback. SwiftUI's accessibility-merge
+  model commonly puts the human-readable label on a SIBLING or a
+  descendant of the hit-test target rather than an ancestor. When
+  the ancestor walk-up returns nothing, the SDK now descends up to
+  6 levels into the touched view's subtree looking for a `UILabel`
+  with text or a view carrying an `accessibilityLabel`. First match
+  wins — closest, shallowest descendant.
+- New `textIndicatesPII` helper applies the same `password` /
+  `card number` / `ssn` substring filter to descendant-found text
+  as to ancestor accessibilityLabel — so a password field's visible
+  text never lands on the wire.
+
+Result: a SwiftUI `Button("Create Image") { … }` tap now ships
+`element.clicked` with `accessibilityLabel = "Create Image"`, and
+the Pages dashboard / live feed / per-person journey all render
+**"Clicked 'Create Image'"** instead of "Clicked an element."
+
+## [1.4.6] — 2026-05-26
+
+SwiftUI hosting-controller denylist — the Pages dashboard no longer
+fills up with framework noise.
+
+**Fixed:**
+
+- The auto-track UIViewController-appearance swizzle was leaking
+  SwiftUI's internal hosting controllers (`PresentationHostingController<AnyView>`,
+  `NavigationStackHostingController<AnyView>`, `UIKitNavigationController`)
+  as `page.viewed` events. The existing denylist caught
+  `UIHostingController` (top-level SwiftUI host) but missed the
+  newer hosting machinery SwiftUI 5 / iOS 16+ added for sheets and
+  NavigationStack. Result on a pure-SwiftUI app: the Pages dashboard
+  filled with framework class names instead of the developer's real
+  screens.
+- New `screenViewClassSubstringDenylist` skips any class containing
+  `HostingController` — catches all current and future SwiftUI host
+  variants (including any prefixed by SwiftUI's mangled namespace).
+- `UIKitNavigationController` (Apple's private UINavigationController
+  subclass that backs NavigationStack) added to the exact-name
+  denylist. It was firing on every navigation push and burying the
+  developer's real screens with 11+ noise events per nav.
+
+The right path for SwiftUI screen names remains `.crossdeckScreen("Name")`
+(shipped in v1.4.5) — these denylist additions just stop the
+fallback from producing noise when the modifier isn't applied yet.
+
 ## [1.4.5] — 2026-05-26
 
 SwiftUI screen tracking — the iOS half of "log in tomorrow morning
