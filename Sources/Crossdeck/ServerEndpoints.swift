@@ -57,7 +57,7 @@ public struct PublicEntitlement: Sendable, Codable, Equatable {
 public struct AliasResult: Sendable, Codable, Equatable {
     public let crossdeckCustomerId: String
     public let mergePending: Bool
-    public let env: Environment
+    public let env: CrossdeckEnvironment
 
     public struct LinkedIdentity: Sendable, Codable, Equatable {
         public let type: String   // "developer" | "anonymous"
@@ -73,7 +73,7 @@ public struct AliasResult: Sendable, Codable, Equatable {
 public struct EntitlementsListResponse: Sendable, Codable, Equatable {
     public let data: [PublicEntitlement]
     public let crossdeckCustomerId: String
-    public let env: Environment
+    public let env: CrossdeckEnvironment
 }
 
 /// `POST /purchases/sync` response. Carries the projected
@@ -89,7 +89,7 @@ public struct EntitlementsListResponse: Sendable, Codable, Equatable {
 /// the Swift-idiomatic camelCase property name.
 public struct PurchaseResult: Sendable, Codable, Equatable {
     public let crossdeckCustomerId: String
-    public let env: Environment
+    public let env: CrossdeckEnvironment
     public let entitlements: [PublicEntitlement]
     public let idempotentReplay: Bool?
 
@@ -108,7 +108,7 @@ public struct HeartbeatResponse: Sendable, Codable, Equatable {
     public let ok: Bool
     public let projectId: String
     public let appId: String
-    public let env: Environment
+    public let env: CrossdeckEnvironment
     public let serverTime: Int64
 }
 

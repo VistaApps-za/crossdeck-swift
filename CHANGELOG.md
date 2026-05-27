@@ -4,6 +4,37 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.8] — 2026-05-27
+
+Rename `enum Environment` → `enum CrossdeckEnvironment`. Structural
+fix for the SwiftUI symbol collision — closes friction #19 deeper
+than v1.4.4 caught it.
+
+**Why:** v1.4.4 added `typealias CrossdeckEnvironment = Environment`
+to disambiguate consumer code that imports both `SwiftUI` and
+`Crossdeck`. That helped consumers but left the module-level public
+`Environment` enum in scope inside the SDK itself. When v1.4.5
+shipped `View.crossdeckScreen("Name")`, the new `ViewModifier`
+contained `@Environment(\.crossdeck) private var cd` — and the
+compiler resolved `Environment` to the SDK's enum (closer than
+SwiftUI's), failing with `'Environment' cannot be used as an
+attribute`. The SDK author shipped a public type that collided
+with the most-used SwiftUI property wrapper for their own code.
+
+**Fix:** rename the source enum to `CrossdeckEnvironment` and
+remove the typealias entirely. There is no short form — the
+qualified name is the only public name. Inside the SDK module
+`@Environment(...)` now resolves to SwiftUI's wrapper
+unambiguously, and consumer code that already follows the docs
+(`let environment: CrossdeckEnvironment = .production`) is
+unchanged.
+
+**Breaking:** consumer code using `Environment.production` /
+`Environment.sandbox` must use `CrossdeckEnvironment.production` /
+`CrossdeckEnvironment.sandbox`. Pre-launch, no shipping consumer
+relies on the short name — all install snippets and dogfood code
+already use the qualified form.
+
 ## [1.4.7] — 2026-05-26
 
 Auto-track tap labels now resolve on SwiftUI buttons — closes the

@@ -152,9 +152,9 @@ public struct EventQueueConfig: Sendable {
 /// backend validator expects.
 public struct EventQueueEnvelope: Sendable {
     public let appId: String
-    public let environment: Environment
+    public let environment: CrossdeckEnvironment
 
-    public init(appId: String, environment: Environment) {
+    public init(appId: String, environment: CrossdeckEnvironment) {
         self.appId = appId
         self.environment = environment
     }

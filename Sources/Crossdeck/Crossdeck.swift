@@ -57,19 +57,20 @@ import WatchKit
 /// Mismatch is rejected at `Crossdeck.start(...)` so a typo'd key
 /// can't silently route production telemetry into sandbox
 /// dashboards.
-public enum Environment: String, Sendable, Codable {
+///
+/// **Naming note.** This type is `CrossdeckEnvironment`, not bare
+/// `Environment`, by design. Apple's SwiftUI ships its own
+/// `Environment` property wrapper — exposing a public top-level
+/// `Environment` enum from this SDK would shadow SwiftUI's wrapper
+/// inside the SDK module (every `@Environment(...)` attribute would
+/// resolve to this enum and fail with "cannot be used as an
+/// attribute") AND for every consumer that `import Crossdeck`s
+/// alongside `import SwiftUI`. The qualified name eliminates the
+/// trap structurally — there is no short form to fall back to.
+public enum CrossdeckEnvironment: String, Sendable, Codable {
     case production
     case sandbox
 }
-
-/// Disambiguating alias for `Environment` — avoids the symbol clash
-/// every SwiftUI consumer hits the moment they `import Crossdeck`
-/// alongside `import SwiftUI` (SwiftUI ships its own `Environment`
-/// property wrapper). Prefer `CrossdeckEnvironment.production` /
-/// `.sandbox` in app code; the bare `Environment` name stays
-/// exported for back-compat and keeps working unqualified in files
-/// that don't `import SwiftUI`.
-public typealias CrossdeckEnvironment = Environment
 
 public struct CrossdeckOptions: Sendable {
     /// Crossdeck App ID issued in the dashboard
@@ -88,7 +89,7 @@ public struct CrossdeckOptions: Sendable {
     /// `publicKey` prefix — `cd_pub_live_…` ↔ `.production`,
     /// `cd_pub_test_…` ↔ `.sandbox`. Mismatch is rejected at
     /// `Crossdeck.start(...)`.
-    public var environment: Environment
+    public var environment: CrossdeckEnvironment
 
     /// Override the API base URL. Default `https://api.cross-deck.com/v1`.
     /// Useful for self-hosted setups or the local emulator. When
@@ -182,7 +183,7 @@ public struct CrossdeckOptions: Sendable {
     public init(
         appId: String,
         publicKey: String,
-        environment: Environment,
+        environment: CrossdeckEnvironment,
         baseUrl: URL? = nil,
         urlSession: URLSession? = nil,
         storage: Storage? = nil,
@@ -375,7 +376,7 @@ public final class Crossdeck: @unchecked Sendable {
         // Validate env matches key prefix — same check Web/Node/RN
         // make to prevent a typo'd build configuration silently
         // routing production telemetry to sandbox dashboards.
-        let expectedEnv: Environment = options.publicKey.hasPrefix("cd_pub_live_") ? .production : .sandbox
+        let expectedEnv: CrossdeckEnvironment = options.publicKey.hasPrefix("cd_pub_live_") ? .production : .sandbox
         guard options.environment == expectedEnv else {
             throw CrossdeckError(
                 type: .invalidRequest,

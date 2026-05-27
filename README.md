@@ -152,7 +152,7 @@ struct YourApp: App {
         // .sandbox. Mismatch throws env_mismatch.
         #if DEBUG
         let publicKey = "cd_pub_test_..."
-        let environment: Environment = .sandbox
+        let environment: CrossdeckEnvironment = .sandbox
         #else
         let publicKey = "cd_pub_live_..."
         let environment: Environment = .production
