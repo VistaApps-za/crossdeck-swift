@@ -4,6 +4,42 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.9] — 2026-05-27
+
+`.crossdeckTap("Name")` — explicit tap-label bolt-on for SwiftUI
+buttons whose label the auto-track can't reach on iOS 16+.
+
+**Added:**
+
+- **`View.crossdeckTap("Name", properties:)`** — public SwiftUI
+  modifier that fires `element.clicked` via `.simultaneousGesture`
+  (the button's own action still runs). One line per important
+  CTA — matches the `.crossdeckScreen` pattern.
+
+**Why this exists.** v1.4.7 added a walk-up-16 + descendant-search
+to the UIWindow.sendEvent tap-capture path. That fixed SwiftUI
+button labels on iOS 13–15 where Buttons rendered through UILabel
+primitives. iOS 16+ SwiftUI uses the Metal text rendering pipeline
+— `Button("Create Image")`'s text is drawn straight to a CALayer
+and never lives on any `UILabel.text` or `UIView.accessibilityLabel`
+the runtime can read. Apple's accessibility merge happens at the
+SwiftUI virtual-view layer above UIKit; `UIView.accessibilityLabel`
+stays nil on the rendered hierarchy. This is an Apple-imposed
+limit, not a CrossDeck regression — Mixpanel, Amplitude, and
+PostHog all ship a per-button modifier as the bank-grade answer.
+
+**Usage:**
+
+```swift
+Button { generateImage() } label: { Text("Create Image") }
+    .crossdeckTap("Create Image")
+```
+
+Composes onto any tappable View (Image with onTapGesture, custom
+card layouts, list rows) — not just Button. Properties flow
+through `cd.track` so coercion / size guard / cross-SDK label
+resolution on the dashboard apply unchanged.
+
 ## [1.4.8] — 2026-05-27
 
 Rename `enum Environment` → `enum CrossdeckEnvironment`. Structural
