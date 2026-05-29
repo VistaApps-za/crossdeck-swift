@@ -2,19 +2,24 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.4.1 — full bank-grade parity.** Modeled line-for-line
-> on the Web/Node/React Native SDKs. v1.4.0 closed the bank-grade
-> reconciliation pillars — deterministic Idempotency-Key on every
-> purchase sync, wire-vocab alignment on error types, per-event
-> idempotency on the queue. v1.4.1 adds **per-user entitlement
-> cache isolation** (physical SHA-256-keyed storage slot per user
-> + unconditional in-memory wipe + logout-grade `clearAll()`) so a
-> shared-device user switch cannot cross-read a prior user's
-> entitlements. v1.5.0 SDK-suite work extends this Swift SDK with
-> the **`CrossdeckContracts`** typed registry + **`reportContractFailure(_:)`**
-> helper for emitting contract-test failures back to Crossdeck over
-> a dedicated reliability channel (Privacy Policy §6, "Flow B") —
-> never via the customer's `track()` pipeline.
+> **Status: v1.5.0 — bank-grade Apple-rail Shape 2 fix.** Closes
+> the identity-key mismatch trap that shipped silently in v1.4.x's
+> `AppAccountTokenDerivation`. See [`CHANGELOG.md`](./CHANGELOG.md)
+> and the "Apple in-app purchase: bank-grade attribution" section
+> below for the one-line code change at your purchase site.
+>
+> v1.4.x closed the bank-grade reconciliation pillars —
+> deterministic Idempotency-Key on every purchase sync, wire-vocab
+> alignment on error types, per-event idempotency on the queue —
+> and added **per-user entitlement cache isolation** (physical
+> SHA-256-keyed storage slot per user + unconditional in-memory
+> wipe + logout-grade `clearAll()`) so a shared-device user switch
+> cannot cross-read a prior user's entitlements. The SDK also
+> includes the **`CrossdeckContracts`** typed registry +
+> **`reportContractFailure(_:)`** helper for emitting contract-test
+> failures back to Crossdeck over a dedicated reliability channel
+> (Privacy Policy §6, "Flow B") — never via the customer's
+> `track()` pipeline.
 >
 > The v1.2.0 base shipped **auto-tracking** (sessions, screen views,
 > tap autocapture), **PrivacyInfo.xcprivacy** (Apple's required-reason
@@ -33,6 +38,91 @@ The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 | **Events** | Durable, deduplicated, batched event ingest. Survives crashes / offline / process suspension. | Your funnels, cohorts, and revenue analytics rest on this never losing or double-counting an event. |
 | **Errors** | Uncaught `NSException` capture, manual `captureError(...)`, stack normalisation, breadcrumbs, beforeSend hook. | When something breaks in prod, you get the actual stack + the user's last 50 actions, not "TypeError: undefined". |
 | **Entitlements** | Synchronous read of "is this customer entitled to feature X?" with on-device cache and async refresh. | Paywall gates without a network round-trip. |
+
+## Apple in-app purchase: bank-grade attribution (v1.5.0+)
+
+If your app makes StoreKit purchases, you need exactly one line of
+code at your purchase site:
+
+```swift
+let token: UUID = Crossdeck.appAccountTokenForCurrentIdentity()
+let result = try await product.purchase(options: [
+    .appAccountToken(token)
+])
+```
+
+`appAccountTokenForCurrentIdentity()` returns a non-optional `UUID`
+— the exact type `Product.PurchaseOption.appAccountToken(_:)` wants.
+Never nil, no force-unwrap, no `UUID(uuidString:)` dance on your side.
+
+That single call closes Shape 2 (identity-key mismatch) on the
+Apple rail — the silent-subscription-orphan bug that grows linearly
+with auto-tracked purchases when the developer's `identify()` value
+changes mid-stream (anonymous → logged in, account merge, SSO
+upgrade). Apple's transaction records are permanent, so a token
+that goes stale never recovers. Don't roll your own UUID, don't
+pass `appAccountToken` derived from your user ID, don't skip this
+step.
+
+### What the helper does
+
+- **First call mints a fresh `UUID()`**, persists it under the
+  storage key `crossdeck.apple_app_account_token`, and returns it.
+- **Every subsequent call returns the same value forever**, within
+  the same install/sign-in session. Identity mutations (anonymous
+  → identified, traits updated, `crossdeckCustomerId` resolved
+  from the server) do NOT change the token.
+- **`reset()` (sign-out) wipes the token.** The next user on the
+  same device mints a fresh one — uniqueness-per-purchasing-entity
+  is the property that makes the server-side attribution join
+  correct in the first place. See `Identity.reset()`'s
+  doc-comment for the full design rationale.
+
+### What if the user is still anonymous at purchase time?
+
+Some apps let a user purchase before they sign up — a paywall hit
+on the first session, an upsell mid-onboarding. The helper handles
+that case the same way:
+
+- The token is **lazy-minted on the first call**, before any
+  `identify()` has happened. The purchase still gets a stable,
+  Apple-immutable token stamped on it.
+- The token is **not derived from the anonymous ID** — it's a
+  fresh random UUID. Rotating the anonymous ID does not affect it.
+- When the user later signs up and you call `identify("user_123")`,
+  the SDK forwards the existing token alongside the alias request.
+  The server records the binding then, attaching every past
+  purchase in that chain to `user_123`. No re-purchase, no manual
+  reconciliation.
+
+### What's happening server-side
+
+When you `identify(userId:...)`, the SDK attaches the persisted
+token to the alias request. Crossdeck records the binding
+`appAccountToken → developerUserId` at that moment. When Apple's
+ASSN V2 webhook arrives later carrying that same token, Crossdeck
+resolves the join via the recorded binding — not via the older
+implicit assumption that `appAccountToken == developerUserId`.
+
+### If you've been on v1.4.x
+
+The deprecated `AppAccountTokenDerivation.derive(developerUserId:)`
+path is still in the module to preserve the cross-SDK test oracle,
+but the auto-track listener and `Crossdeck.syncPurchases(...)` no
+longer call it. Just upgrade to 1.5.0 — no migration code on your
+side. Past purchases that were stamped with the old derivation
+remain bound to whatever they were bound to; the legacy fallback
+path on the server (`appAccountToken == developerUserId`) still
+resolves them correctly for the cases where your developer ID was
+stable across the entire customer lifetime.
+
+The cases that broke on v1.4.x — anonymous-purchase-then-login,
+account merges, SSO upgrades — are surfaced server-side in
+**Settings → Identity → Conflicts** as an
+`Apple unbound token` row (kind `apple_unbound_token`). Operator
+reviews each: confirm the legacy resolution, mark standalone, or
+claim into the correct app user via the customer detail page's
+merge flow.
 
 ## Auto-tracking (v1.2.0+)
 

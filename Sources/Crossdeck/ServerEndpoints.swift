@@ -123,6 +123,16 @@ struct AliasIdentityRequest: Encodable {
     let anonymousId: String
     let email: String?
     let traits: [String: String]?
+    /// Apple-rail purchase identity, when the install has already
+    /// minted one via `Crossdeck.appAccountTokenForCurrentIdentity()`.
+    /// Sent on every `identify()` so the server records the
+    /// (appAccountToken → developerUserId) binding before any later
+    /// ASSN V2 webhook arrives carrying that token. Closes the
+    /// Shape 2 trap by making the server-side join authoritative
+    /// rather than implicitly assuming `appAccountToken ==
+    /// developerUserId`. `nil` when the install has never touched
+    /// Apple-rail purchases.
+    let appAccountToken: String?
 }
 
 /// `POST /identity/forget` request body.

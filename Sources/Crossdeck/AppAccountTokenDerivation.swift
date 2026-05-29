@@ -1,31 +1,70 @@
-// AppAccountTokenDerivation — bank-grade appAccountToken handling
-// for the Crossdeck Apple-rail purchase sync.
+// AppAccountTokenDerivation — DEPRECATED post-v1.4.x.
 //
-// Phase 2.1 of bank-grade reconciliation v1.4.0. Pre-v1.4.0 the
-// auto-track path stuffed the StoreKit `originalTransactionId`
-// (a numeric string) into the wire-level `appAccountToken` field,
-// which violates the StoreKit contract — `appAccountToken` is
-// defined as a UUID. A numeric string passes the SDK and reaches
-// the backend, but any downstream system that interprets it as a
-// UUID (analytics joins, Apple's own server-to-server notifications)
-// is wrong.
+// Do NOT call from new code. Use
+// `Crossdeck.appAccountTokenForCurrentIdentity()` instead.
 //
-// The fix:
-//   * Derive a proper UUID from `developerUserId`.
-//   * Send `originalTransactionId` in its own dedicated wire field
-//     so the backend can still correlate without polluting the
-//     UUID slot.
+// =========================================================
+// Why this file is deprecated
+// =========================================================
 //
-// Decision tree:
-//   1. If `developerUserId` parses as a valid UUID, use it directly
-//      (caller already gave us a UUID — no derivation needed).
-//   2. Else if `developerUserId` is non-empty, derive RFC 4122 §4.3
-//      UUID v5 from the URL namespace + "crossdeck:<id>" — stable
-//      across launches, so resubmitting the same purchase produces
-//      the same token (Apple uses this for cross-receipt linkage).
-//   3. Else (no developerUserId), omit the field. The backend
-//      validator accepts null; never silently sending a wrong UUID
-//      is the bank-grade default.
+// The function below derives `appAccountToken` deterministically
+// from `developerUserId`. That looks elegant: same id → same
+// token, no persistence required. The property it actually has —
+// and the bug it shipped to production at v1.4.0 — is that the
+// token is a function of an identifier that is MUTABLE across a
+// user's life.
+//
+// The failure walks itself:
+//
+//   1. User is anonymous; auto-track path derives token T1 from
+//      whatever pseudonymous handle is current.
+//   2. Purchase commits. Apple stores T1 PERMANENTLY in its
+//      transaction record. T1 appears on every renewal of that
+//      chain until the subscription ends.
+//   3. User signs in. developerUserId changes to their real ID.
+//      The helper now derives T2 ≠ T1.
+//   4. The original purchase's renewals continue to arrive at the
+//      Crossdeck backend carrying T1. T1 is not bound to anyone
+//      in the SDK's view; the SDK cannot reproduce T1 anymore.
+//   5. The user's identified purchases are now keyed by T2 in
+//      the SDK's model but T1 in Apple's. The server-side join
+//      breaks silently; the subscription orphans under the wrong
+//      customer or under no customer at all.
+//
+// Anon-purchase-then-login, account merges, and email-to-SSO
+// upgrades are the median paid-user path, not edge cases. Shape 2
+// (identity-key mismatch) shipped to production through this
+// derivation. Bug count grew linearly with auto-tracked purchases.
+//
+// =========================================================
+// The replacement
+// =========================================================
+//
+// `Crossdeck.appAccountTokenForCurrentIdentity()` mints a fresh
+// random UUID on first call, persists it under the storage key
+// `crossdeck.apple_app_account_token`, and returns the same value
+// forever — independent of any identity mutation. The server
+// learns the binding via `identify()`'s alias request, which now
+// carries `appAccountToken` alongside `userId` + `anonymousId`.
+// Webhook arrives with that token later → server resolves via
+// the recorded binding, not via a derivation guess.
+//
+// `reset()` (sign-out) wipes the token; the next user on the
+// same device mints a fresh one. See `Identity.reset()` for why
+// wipe-on-reset is the load-bearing property that makes the
+// uniqueness-per-entity invariant hold across multi-user devices.
+//
+// =========================================================
+// What stays
+// =========================================================
+//
+// The function below remains in the module to keep the pinned
+// cross-SDK oracle (`a66b1640-efaf-bb4d-1261-6650033bf111` for
+// `deriveForPurchase("apple", "eyJ.jws.sig", nil)`) asserting as
+// a back-compat verification of the wire format itself — it is
+// no longer called from the auto-track or syncPurchases paths
+// inside the SDK. The internal access level means no third-party
+// consumer can call it directly.
 
 import Foundation
 import CryptoKit

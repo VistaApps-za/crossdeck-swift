@@ -561,23 +561,29 @@ public final class Crossdeck: @unchecked Sendable {
                         // "finish iff success" contract + persist
                         // failures to the retry queue.
                         //
-                        // appAccountToken is derived from
-                        // developerUserId via
-                        // AppAccountTokenDerivation (UUID v5 in the
-                        // URL namespace if the id isn't already a
-                        // UUID). The numeric StoreKit
-                        // originalTransactionId rides in its OWN
-                        // wire field as of v1.4.0 — pre-1.4.0 it
-                        // was stuffed into appAccountToken, which
-                        // violated the StoreKit UUID contract.
-                        let snap = identityRef.snapshotSync()
-                        let derivedToken = AppAccountTokenDerivation
-                            .derive(developerUserId: snap.developerUserId)
+                        // appAccountToken is the install-stable
+                        // value minted on first purchase and
+                        // persisted across launches; it survives
+                        // `identify()` mutations and is wiped only
+                        // on `reset()` (sign-out). See
+                        // Identity.swift's `reset()` design rationale
+                        // for the uniqueness-per-entity property
+                        // this closes — and the deprecation note
+                        // on `AppAccountTokenDerivation` for why
+                        // the older derive(developerUserId:) path
+                        // shipped Shape 2 silently.
+                        //
+                        // The numeric StoreKit originalTransactionId
+                        // rides in its OWN wire field as of v1.4.0
+                        // (pre-1.4.0 it was stuffed into
+                        // appAccountToken, which violated the
+                        // StoreKit UUID contract).
+                        let token = identityRef.ensureAppAccountTokenSync()
                         let body = PurchaseSyncRequest(
                             rail: "apple",
                             signedTransactionInfo: jws,
                             signedRenewalInfo: nil,
-                            appAccountToken: derivedToken,
+                            appAccountToken: token,
                             originalTransactionId: originalTransactionId
                         )
                         guard let bodyData = try? JSONEncoder().encode(body) else {
@@ -856,6 +862,99 @@ public final class Crossdeck: @unchecked Sendable {
     ///
     /// For the throwing variant that awaits the canonical
     /// `crossdeckCustomerId`, see `identifyAndWait(...)`.
+    /// Return the install-stable Apple-rail `appAccountToken` bound to
+    /// the current purchasing entity. Mints lazily on first call,
+    /// persists across launches, returns the same value forever — until
+    /// `reset()` wipes it.
+    ///
+    /// Pass the result directly to StoreKit's `Product.PurchaseOption
+    /// .appAccountToken(_:)` at purchase time — the return type is
+    /// `UUID` to match StoreKit's signature exactly, no conversion
+    /// needed:
+    ///
+    ///     let token = Crossdeck.appAccountTokenForCurrentIdentity()
+    ///     let result = try await product.purchase(options: [
+    ///         .appAccountToken(token)
+    ///     ])
+    ///
+    /// # Anonymous-user / pre-identify purchases
+    ///
+    /// **The function never returns nil** — the return type is
+    /// non-optional by construction. It works the same whether the
+    /// user has identified yet or not:
+    ///
+    ///   1. Anonymous user opens app, never calls `identify()`,
+    ///      makes a purchase. Helper mints a fresh UUID, persists it,
+    ///      returns it. Purchase commits with that UUID baked into
+    ///      Apple's transaction record forever.
+    ///   2. User identifies later (sign-in, account creation, SSO).
+    ///      The SDK's next `identify(userId:)` call attaches the
+    ///      *same* persisted UUID to the alias request. The server
+    ///      records the binding `(UUID → developerUserId)`.
+    ///   3. Apple's webhook arrives with that UUID at any later
+    ///      point. Crossdeck resolves the customer via the binding.
+    ///
+    /// The token is NOT derived from `anonymousId`. It is minted as a
+    /// fresh `UUID()` (v4, random) on first call and persisted as-is.
+    /// Anonymous state has no influence on the value; identity
+    /// mutations don't change it. The only thing that wipes it is
+    /// `reset()` (sign-out) — at which point the next user on the
+    /// device mints a fresh one.
+    ///
+    /// # Why this helper exists
+    ///
+    /// Apple's purchase records are immutable: once a transaction
+    /// commits with `appAccountToken = T`, every renewal in the chain
+    /// emits `T` forever, independent of anything the client does. The
+    /// server-side mapping `T → customer` is single-valued at any
+    /// instant. Together those mean the token must be UNIQUE PER
+    /// PURCHASING ENTITY for the server-side join to be correct.
+    ///
+    /// Prior to this helper, the SDK derived `appAccountToken` from
+    /// `developerUserId` via UUID v5 (see
+    /// `AppAccountTokenDerivation.swift`). That made the token a
+    /// deterministic function of an identifier that is MUTABLE across
+    /// a user's life — anon → login → merge → SSO upgrade. Purchases
+    /// committed under one identity got tokens that the SDK could no
+    /// longer regenerate after the identity changed. Shape 2 (identity
+    /// -key mismatch) shipped to production silently.
+    ///
+    /// This helper makes Shape 2 impossible-by-construction on the
+    /// happy path: token derives from nothing except the install's
+    /// own minting moment; identity changes don't alter it; the
+    /// server learns the binding via `identify()`'s alias request
+    /// (the SDK attaches the token to every alias call after the
+    /// first mint).
+    ///
+    /// # Lifecycle
+    ///
+    /// * Persisted across app launches under storage key
+    ///   `crossdeck.apple_app_account_token`.
+    /// * Survives `identify()` mutations — the whole point.
+    /// * Wiped on `reset()` (sign-out). See `Identity.reset()` for the
+    ///   uniqueness-per-entity rationale behind the wipe.
+    /// * Returns a `UUID` value (StoreKit's exact type) — backend
+    ///   rejects non-UUID values at write time, but the SDK mints
+    ///   `UUID()` directly so the wire payload always conforms.
+    ///
+    /// # Manual override
+    ///
+    /// Power users who manage their own token lifecycle can pass an
+    /// explicit `appAccountToken` to `syncPurchases(...)`; that path
+    /// honours the override and does NOT consult this helper.
+    public func appAccountTokenForCurrentIdentity() -> UUID {
+        let stringForm = identity.ensureAppAccountTokenSync()
+        // `ensureAppAccountTokenSync` mints via
+        // `UUID().uuidString.lowercased()` and persists the same
+        // string, so a successful parse here is the universal case.
+        // The fallback covers a storage-corruption edge that should
+        // never happen in practice: if the persisted value somehow
+        // isn't parseable, we fail safe by returning a fresh UUID
+        // (matches the "never nil" contract) and let the next
+        // `ensureAppAccountTokenSync` call re-mint canonically.
+        return UUID(uuidString: stringForm) ?? UUID()
+    }
+
     public func identify(
         userId: String,
         email: String? = nil,
@@ -958,7 +1057,16 @@ public final class Crossdeck: @unchecked Sendable {
                         userId: userId,
                         anonymousId: snapshot.anonymousId,
                         email: email,
-                        traits: wireTraits
+                        traits: wireTraits,
+                        // Carry the persisted Apple-rail token IFF a
+                        // prior purchase flow already minted one. The
+                        // server records the binding so a later ASSN
+                        // V2 webhook resolves the join authoritatively
+                        // — closes Shape 2 (identity-key mismatch)
+                        // without needing the appAccountToken to equal
+                        // developerUserId. `identify()` never triggers
+                        // minting; only the purchase path does.
+                        appAccountToken: snapshot.appAccountToken
                     )
                 )
                 // Persist the canonical cdcust_ so subsequent events
@@ -1019,7 +1127,11 @@ public final class Crossdeck: @unchecked Sendable {
                 userId: userId,
                 anonymousId: snapshot.anonymousId,
                 email: email,
-                traits: wireTraits
+                traits: wireTraits,
+                // Same rationale as the background-fire path in
+                // `identify()` above — server records the binding so
+                // a later webhook resolves authoritatively.
+                appAccountToken: snapshot.appAccountToken
             )
         )
         identity.setCrossdeckCustomerIdSync(result.crossdeckCustomerId)
@@ -1117,11 +1229,14 @@ public final class Crossdeck: @unchecked Sendable {
         // locally to key the entitlement cache.
         let snap = identity.snapshotSync()
         // Manual path: if the caller supplied an appAccountToken
-        // explicitly, honour it; else derive one from
-        // developerUserId so the contract matches the auto-track
-        // path (v1.4.0 — bank-grade UUID conformance).
-        let resolvedToken = appAccountToken ?? AppAccountTokenDerivation
-            .derive(developerUserId: snap.developerUserId)
+        // explicitly, honour it (power users manage their own); else
+        // fall back to the persisted install-stable token via the
+        // same path the auto-track listener uses. The legacy
+        // `AppAccountTokenDerivation.derive(developerUserId:)` is
+        // intentionally NOT consulted here — see its deprecation
+        // header for why deterministic-from-developerUserId
+        // re-introduced Shape 2 silently.
+        let resolvedToken = appAccountToken ?? identity.ensureAppAccountTokenSync()
         let body = PurchaseSyncRequest(
             rail: rail.rawValue,
             signedTransactionInfo: signedTransactionInfo,

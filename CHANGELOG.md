@@ -4,6 +4,129 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] — 2026-05-29
+
+**Compile-fix patch on 1.5.0.** The 1.5.0 helper signature didn't
+match StoreKit's contract — `Product.PurchaseOption.appAccountToken`
+takes a `UUID`, not a `String`, so the snippet in the 1.5.0 release
+notes would not compile when pasted as-is. Caught by a dogfood
+integrator before 1.5.0 reached anyone else. No behavioural change
+beyond the type — the persisted storage representation is unchanged.
+
+**Changed:**
+
+- **`Crossdeck.appAccountTokenForCurrentIdentity()` now returns
+  `UUID` instead of `String`.** The helper still mints a single
+  RFC 4122 random UUID v4 per install, persists it under
+  `crossdeck.apple_app_account_token`, and returns the same value
+  forever until `reset()`. The string form is what crosses the
+  wire to the backend on `identify()`; the `UUID` form is what
+  StoreKit demands at purchase time. Source-incompatible only if
+  you were storing the return value in a `String` — replace with
+  `UUID` and the rest of the call site is unchanged.
+
+  Corrected snippet:
+
+  ```swift
+  let token: UUID = Crossdeck.appAccountTokenForCurrentIdentity()
+  let result = try await product.purchase(options: [
+      .appAccountToken(token)
+  ])
+  ```
+
+- **Doc-comment expanded to cover the anonymous-user / pre-identify
+  case.** Three properties are now spelled out on the helper itself
+  so integrators don't have to second-guess from release notes:
+
+  1. **Never returns `nil`.** Even before the first `identify()`
+     call, the helper lazy-mints a UUID and returns it. Purchases
+     made while the SDK only knows the anonymous identity still get
+     a stable token.
+  2. **Not derived from `anonymousId`.** It is a fresh random UUID,
+     independent of every other Crossdeck identifier. Rotating or
+     resetting `anonymousId` does not affect it.
+  3. **Persists across `identify()`.** When the developer later
+     calls `identify("user_123")`, the SDK forwards the existing
+     token alongside the alias request so the backend can bind
+     `appAccountToken → developerUserId` without minting a new one.
+     Past purchases stay attributed to the same chain.
+
+  `reset()` is the only thing that wipes it, by design — the next
+  user on the same device must not inherit the prior user's token.
+
+## [1.5.0] — 2026-05-29
+
+**Bank-grade Apple-rail Shape 2 fix.** The previous v1.4.x line
+shipped an `appAccountToken` derivation that was a deterministic
+function of `developerUserId`. That input is mutable across a
+user's life (anonymous → logged in → account merge → SSO upgrade),
+and Apple's transaction records are permanent. The instant
+`developerUserId` changed, the SDK could no longer reproduce the
+token Apple had stored — every renewal in that chain orphaned
+silently. Bug count grew linearly with auto-tracked purchases.
+
+This release makes the bug **impossible by construction** on the
+happy path. The full design rationale is in
+`Sources/Crossdeck/Identity.swift`'s `reset()` doc-comment.
+
+**Added:**
+
+- **`Crossdeck.appAccountTokenForCurrentIdentity() -> String`** —
+  public helper. First call mints a fresh `UUID()`, persists it
+  under the storage key `crossdeck.apple_app_account_token`, and
+  returns the same value forever — independent of any `identify()`
+  mutation. Wiped only on `reset()` (sign-out) so the next user on
+  the same device receives a fresh token.
+
+  Pass the result to StoreKit at purchase time:
+
+  ```swift
+  let token = Crossdeck.appAccountTokenForCurrentIdentity()
+  let result = try await product.purchase(options: [
+      .appAccountToken(token)
+  ])
+  ```
+
+  Server-side, the binding `appAccountToken → developerUserId` is
+  recorded via `identify()`'s alias request (the SDK attaches the
+  persisted token automatically). Apple's later ASSN V2 webhook
+  resolves via that binding, not the older implicit assumption
+  that `appAccountToken == developerUserId`.
+
+**Changed:**
+
+- `PurchaseAutoTrack` and `Crossdeck.syncPurchases(...)` now read
+  the persisted token via `Identity.ensureAppAccountTokenSync()`
+  instead of deriving from `developerUserId`. Existing call sites
+  upgrade automatically — no source changes required for consumers
+  using the auto-track path.
+- `AliasIdentityRequest` gains `appAccountToken: String?`. Every
+  `identify()` and `identifyAndWait()` now carries the persisted
+  token (when present) so the server records the binding before
+  any later webhook arrives.
+
+**Deprecated:**
+
+- `AppAccountTokenDerivation.derive(developerUserId:)` — kept in
+  the module to preserve the pinned cross-SDK oracle, but no
+  longer called from the auto-track or `syncPurchases` paths.
+  Header comment documents the failure walk so future contributors
+  don't reintroduce the same trap by "simplifying" the persistence
+  away.
+
+**The actionability principle:**
+
+Crossdeck's existing design philosophy ("classify, don't silently
+drop") is right for events the developer can act on — cross-origin
+`Script error.` events get captured with a `cross_origin` tag and
+pointed at the CORS fix. It is NOT right for events the developer
+cannot act on. Browser-extension errors, ad-blocker hits, and
+Shape 2 orphans created by the prior derivation path all fall in
+the latter category. This release applies the same principle to
+the Apple-rail token: drop the deterministic-from-userId
+derivation, persist a stable per-install UUID, and let the server
+own the resolution via the recorded binding.
+
 ## [1.4.10] — 2026-05-27
 
 `Crossdeck.reportContractFailure(_:)` is now single-fire to a

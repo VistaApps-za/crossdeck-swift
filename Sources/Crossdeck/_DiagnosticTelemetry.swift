@@ -44,8 +44,11 @@ internal enum _DiagnosticTelemetry {
     static let endpointURL = "https://api.cross-deck.com/v1/sdk/diagnostic"
 
     /// The reliability project's publishable key. Hardcoded for the
-    /// same reason. Replace at provisioning time.
-    static let publishableKey = "cd_pub_RELIABILITY_PLACEHOLDER_TO_BE_PROVISIONED"
+    /// same reason. Provisioned 2026-05-27 — Crossdeck reliability
+    /// workspace (app_web_92b2d6a5728a4d). Every customer SDK's
+    /// contract_failed events route here for Crossdeck-on-Crossdeck
+    /// observability.
+    static let publishableKey = "cd_pub_live_9490e7aa029c432abf"
 
     /// Whether the telemetry is enabled. Disabled while the
     /// reliability project is unprovisioned (placeholder key in
