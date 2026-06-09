@@ -4,6 +4,26 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.5] — 2026-06-09
+
+**Matching discipline: never attribute a family-shared subscription.** The
+1.5.3 currentEntitlements sweep forwarded *every* verified entitlement,
+including family-shared ones — but a family-shared transaction's
+`originalTransactionId` belongs to the family ORGANIZER, not the signed-in
+user. Binding it (with this user's `appAccountToken` attached) would hand the
+organizer's subscription to a family member: a wrong-merge, the one outcome
+pillar #1 forbids.
+
+**Fixed:**
+
+- The auto-sweep now SKIPS transactions whose `ownershipType == .familyShared`
+  for ATTRIBUTION. Access is unaffected — the family member is still entitled
+  locally (the Phase 3 gate honours family-shared receipts); only the
+  owner-label binding is withheld. The organizer attributes the subscription on
+  their own device, where the transaction is `.purchased`. The
+  `apple.entitlements_resynced` summary event gains a `skipped_family_shared`
+  count for observability.
+
 ## [1.5.4] — 2026-06-09
 
 **Access never waits for attribution.** A paying subscriber is now entitled by

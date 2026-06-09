@@ -91,12 +91,29 @@ final class AppleEntitlementSync: @unchecked Sendable {
     private static func run(sync: SyncBackend, emit: EmitTrack) async {
         var attempted = 0
         var linked = 0
+        var skippedFamilyShared = 0
         // `currentEntitlements` yields ONLY currently-valid entitlements
         // (StoreKit filters expired + revoked), so every verified element is a
         // live subscription worth binding to this user.
         for await result in Transaction.currentEntitlements {
             guard !Task.isCancelled else { break }
             guard case .verified(let transaction) = result else { continue }
+
+            // Phase 5 — matching discipline: NEVER attribute a family-shared
+            // subscription. Its `originalTransactionId` belongs to the family
+            // ORGANIZER, not this user; binding it here (with this user's
+            // appAccountToken attached by the sync closure) would hand the
+            // organizer's subscription to a family member — a wrong-merge, the
+            // one thing pillar #1 forbids. ACCESS is unaffected: the family
+            // member is still entitled locally (AppleLocalEntitlements includes
+            // family-shared for the gate); only the owner-label binding is
+            // withheld. The organizer attributes it on their OWN device, where
+            // the transaction is `.purchased`.
+            if transaction.ownershipType == .familyShared {
+                skippedFamilyShared += 1
+                continue
+            }
+
             let jws = result.jwsRepresentation
             guard !jws.isEmpty else { continue }
             attempted += 1
@@ -105,10 +122,11 @@ final class AppleEntitlementSync: @unchecked Sendable {
         }
         // One summary event (NOT one-per-sub) so the dashboard sees the relink
         // without N historical `purchase.completed` rows on every launch.
-        if attempted > 0 {
+        if attempted > 0 || skippedFamilyShared > 0 {
             emit("apple.entitlements_resynced", [
                 "attempted": attempted,
                 "linked": linked,
+                "skipped_family_shared": skippedFamilyShared,
                 "rail": "apple",
             ])
         }

@@ -9,5 +9,5 @@ import Foundation
 
 public enum SDK {
     public static let name = "@cross-deck/swift"
-    public static let version = "1.5.4"
+    public static let version = "1.5.5"
 }
