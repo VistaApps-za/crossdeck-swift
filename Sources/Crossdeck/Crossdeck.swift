@@ -306,6 +306,18 @@ public final class Crossdeck: @unchecked Sendable {
     /// itself carries no `@available` constraint.
     private var appleEntitlementSync: Any?
 
+    /// Learned productId → entitlement-key map (Phase 3, the ACCESS half).
+    /// Rebuilt last-snapshot-wins from every backend entitlement snapshot and
+    /// persisted, so a device-verified Apple receipt can be resolved to an
+    /// entitlement key offline. Platform-agnostic (no StoreKit), always set.
+    private let appleProductMap: AppleProductMap
+
+    /// StoreKit 2 Transaction.currentEntitlements live mirror — the on-device
+    /// access source of truth. nil on non-iOS / below iOS 15 (resolution then
+    /// falls back to the backend cache, exactly as before Phase 3). Stored as
+    /// `Any?` so the property carries no `@available` constraint.
+    private var appleLocalEntitlements: Any?
+
     /// NSNotificationCenter observer tokens captured by
     /// [installLifecycleObservers]. Pre-v1.4.0 the `addObserver`
     /// return values were discarded — every start()/stop()/start()
@@ -457,6 +469,7 @@ public final class Crossdeck: @unchecked Sendable {
         self.identity = Identity(storage: storage)
         self.superProperties = SuperProperties(storage: storage)
         self.entitlements = EntitlementCache(storage: storage)
+        self.appleProductMap = AppleProductMap(storage: storage)
         self.consent = ConsentManager(initial: options.initialConsent, scrubPII: options.scrubPII)
         self.breadcrumbs = Breadcrumbs(capacity: options.breadcrumbCapacity)
         // Events endpoint = baseUrl + "/events". The /events path is
@@ -689,8 +702,25 @@ public final class Crossdeck: @unchecked Sendable {
                     sweeper.sweep(forUserId: uid)
                 }
             }
+
+            // Phase 3 — ACCESS. Always-on (not opt-in): begin mirroring this
+            // device's verified currentEntitlements so isEntitled can answer
+            // from the signed receipt offline, before any backend round-trip.
+            let localEntitlements = AppleLocalEntitlements()
+            localEntitlements.start()
+            self.appleLocalEntitlements = localEntitlements
         }
         #endif
+
+        // Warm the product→key map from the persisted snapshot of the
+        // already-identified user (if any), so an offline cold boot can resolve
+        // a verified receipt to an entitlement key immediately — before this
+        // session reaches the backend. The map itself also self-loaded its
+        // last persisted copy in its initializer (covers anonymous boot).
+        if let uid = identity.snapshotSync().developerUserId,
+           let persisted = entitlements.entitlementsSync(for: uid) {
+            appleProductMap.update(from: persisted)
+        }
     }
 
     // MARK: - Public API
@@ -1360,6 +1390,10 @@ public final class Crossdeck: @unchecked Sendable {
                 entitlements: result.entitlements
             ))
         }
+        // Phase 3 — relearn the productId→key map from this fresh backend
+        // snapshot (last-snapshot-wins) so on-device receipt resolution stays
+        // current, and a present backend that re-sources a mapping wins.
+        appleProductMap.update(from: result.entitlements)
         // Phase 3.5 (v1.4.0) — emit purchase.completed so manual
         // syncPurchases callers show up on the same funnel as the
         // StoreKit auto-track path. Schema mirrors the auto-track
@@ -1425,6 +1459,8 @@ public final class Crossdeck: @unchecked Sendable {
             developerUserId: userId,
             entitlements: response.data
         ))
+        // Phase 3 — relearn the productId→key map (last-snapshot-wins).
+        appleProductMap.update(from: response.data)
         return response.data
     }
 
@@ -1485,22 +1521,55 @@ public final class Crossdeck: @unchecked Sendable {
         return try JSONDecoder().decode(AliasResult.self, from: data)
     }
 
-    /// Synchronous check — returns true iff the entitlement key is
-    /// in the cached set for the currently identified user. Safe
-    /// to call from any thread, including SwiftUI view bodies and
-    /// UIKit tap handlers. Never blocks on network.
+    /// Three-state entitlement check (Phase 3 — the access half). PREFER this
+    /// over `isEntitled` for paywall gating: it distinguishes "checking"
+    /// (`.resolving`) from a hard "no" (`.notEntitled`), so a paying subscriber
+    /// whose device receipt the SDK hasn't finished reading never sees a flash
+    /// of "not Pro". Safe on any thread (SwiftUI bodies, tap handlers); never
+    /// blocks on network.
     ///
-    /// Returns false if no user is identified, or if the cache has
-    /// nothing for the current user (treat as "not yet known" —
-    /// fall back to a refresh + paywall if needed).
+    /// Resolution order (see `EntitlementResolution.resolve`):
+    ///   1. Backend grant (persisted cache, offline-hydrated) → `.entitled`.
+    ///   2. Device-verified Apple receipt mapped to this key → `.entitled` —
+    ///      offline, and never revoked against an *absent* backend.
+    ///   3. The receipt read is still in flight, OR the device holds a verified
+    ///      active sub the SDK can't yet name → `.resolving`.
+    ///   4. Otherwise → `.notEntitled`.
+    public func entitlementStatus(_ key: String) -> EntitlementStatus {
+        // Tombstone gate (v1.4.0 Phase 2.3): during a reset() clear window,
+        // deny so paywalls never observe the prior user's cached entitlements.
+        if isResetting { return .notEntitled }
+        let userId = identity.snapshotSync().developerUserId
+        let backendGrants = userId.map { entitlements.isEntitledSync(key, for: $0) } ?? false
+        // Default `[]` (read-complete, empty) on platforms without a StoreKit
+        // receipt path, so resolution is backend-only there — exactly the
+        // pre-Phase-3 behaviour, never a permanent `.resolving`.
+        var localProducts: Set<String>? = []
+        #if canImport(StoreKit) && os(iOS)
+        if #available(iOS 15.0, *),
+           let local = appleLocalEntitlements as? AppleLocalEntitlements {
+            localProducts = local.snapshot()
+        }
+        #endif
+        return EntitlementResolution.resolve(
+            key: key,
+            backendGrantsKey: backendGrants,
+            localActiveProductIds: localProducts,
+            productMap: appleProductMap.snapshot()
+        )
+    }
+
+    /// Synchronous boolean gate — `true` iff `entitlementStatus(key) ==
+    /// .entitled`. Safe to call from any thread, never blocks on network.
+    ///
+    /// Back-compatible and MONOTONIC: returns `true` for every case the
+    /// pre-Phase-3 cache-only check did (a backend grant), and ADDITIONALLY
+    /// for a device-verified Apple receipt the backend cache hasn't caught up
+    /// to. It never flips a genuinely entitled user to `false`. A `.resolving`
+    /// state reads as `false` here (conservative for a plain Bool) — gate on
+    /// `entitlementStatus` if you want to show "checking…" instead of a paywall.
     public func isEntitled(_ key: String) -> Bool {
-        // v1.4.0 Phase 2.3 — tombstone gate. During a `reset()`
-        // clear window, return false so paywall gates never observe
-        // the prior identified user's cached entitlements between
-        // caller invocation and actor work landing.
-        if isResetting { return false }
-        guard let userId = identity.snapshotSync().developerUserId else { return false }
-        return entitlements.isEntitledSync(key, for: userId)
+        return entitlementStatus(key) == .entitled
     }
 
     /// Synchronous read of the full entitlement set for the current
@@ -1821,9 +1890,14 @@ public final class Crossdeck: @unchecked Sendable {
            let sweeper = appleEntitlementSync as? AppleEntitlementSync {
             sweeper.stop()
         }
+        if #available(iOS 15.0, *),
+           let local = appleLocalEntitlements as? AppleLocalEntitlements {
+            local.stop()
+        }
         #endif
         purchaseAutoTrack = nil
         appleEntitlementSync = nil
+        appleLocalEntitlements = nil
 
         // v1.4.0 Phase 5.1 — drop every NSNotificationCenter
         // observer this client installed. Pre-v1.4.0 the

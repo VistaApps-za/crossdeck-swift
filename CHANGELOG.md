@@ -4,6 +4,45 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.4] — 2026-06-09
+
+**Access never waits for attribution.** A paying subscriber is now entitled by
+their own device's signed Apple receipt the instant they open the app —
+offline, before any backend round-trip — instead of waiting on the backend
+entitlement cache. This is the ACCESS half of the Apple spine (1.5.3 shipped
+the attribution half).
+
+**Added:**
+
+- **`entitlementStatus(_:) -> EntitlementStatus` — a three-state gate.**
+  `.entitled` / `.notEntitled` / `.resolving`. Prefer it over `isEntitled` for
+  paywalls: `.resolving` ("checking your subscription…") is the honest answer
+  when the device holds a verified active subscription the SDK can't yet name
+  (fresh install, never synced online, fully offline). Showing a spinner there
+  instead of a paywall is what stops a flash of "not Pro" at a paying user.
+  Self-heals on first connectivity. (That sliver — never online, then offline —
+  is irreducible; RevenueCat carries the identical one.)
+
+**Changed:**
+
+- **`isEntitled(_:)` now resolves device-first.** Resolution order: a backend
+  grant (persisted, offline-hydrated) wins; else a device-verified Apple
+  receipt mapped to the key wins — **offline, and never revoked against an
+  *absent* backend** (Apple's signature is proof of payment); else `.resolving`
+  or `.notEntitled`. **Monotonic + back-compatible:** returns `true` for every
+  case the old cache-only check did, plus device-verified receipts the cache
+  hasn't caught up to. It never flips a genuinely entitled user to `false`.
+
+  Reconciliation rule: **protect against backend-absent; yield to
+  backend-present-and-disagrees.** The verified receipt is sacrosanct when the
+  network is down, but the product→entitlement MAP is developer config — a
+  reachable backend that re-sources a mapping wins (the map is rebuilt
+  last-snapshot-wins from the freshest backend snapshot, so a retired
+  product→key pairing can't linger on-device).
+
+Non-iOS / pre-iOS-15 targets are unaffected — resolution stays backend-only,
+exactly as before.
+
 ## [1.5.3] — 2026-06-09
 
 **Existing Apple subscribers now self-heal on return — no migration script.**

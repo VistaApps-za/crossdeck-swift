@@ -20,8 +20,8 @@ final class AsyncLifecycleTests: XCTestCase {
             appId: "app_async_lifecycle",
             publicKey: "cd_pub_test_lifecycle",
             environment: .sandbox,
-            captureUncaughtExceptions: false,
-            storage: MemoryStorage()
+            storage: MemoryStorage(),
+            captureUncaughtExceptions: false
         )
     }
 

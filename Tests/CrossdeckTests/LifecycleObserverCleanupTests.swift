@@ -20,8 +20,8 @@ final class LifecycleObserverCleanupTests: XCTestCase {
             appId: "app_test_observer",
             publicKey: "cd_pub_test_obs",
             environment: .sandbox,
-            captureUncaughtExceptions: false,
-            storage: MemoryStorage()
+            storage: MemoryStorage(),
+            captureUncaughtExceptions: false
         )
     }
 

@@ -78,7 +78,7 @@ final class PendingPurchaseQueueTests: XCTestCase {
         XCTAssertEqual(entry?.attempts, 1)
         XCTAssertEqual(entry?.originalTransactionId, "1000000111")
         XCTAssertEqual(
-            entry?.nextRetryAt.timeIntervalSince(now),
+            entry!.nextRetryAt.timeIntervalSince(now),
             PendingPurchaseQueue.backoffSchedule[0],
             accuracy: 0.001,
             "First retry must use the first backoff slot (30s)"
@@ -107,7 +107,7 @@ final class PendingPurchaseQueueTests: XCTestCase {
             XCTAssertEqual(entry?.attempts, attempt)
             let expectedBackoff = PendingPurchaseQueue.backoffSchedule[min(attempt - 1, PendingPurchaseQueue.backoffSchedule.count - 1)]
             XCTAssertEqual(
-                entry?.nextRetryAt.timeIntervalSince(now),
+                entry!.nextRetryAt.timeIntervalSince(now),
                 expectedBackoff,
                 accuracy: 0.001
             )
