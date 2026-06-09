@@ -4,6 +4,35 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.2] — 2026-06-09
+
+**Compile-fix patch on 1.5.1.** Every documented call-site — the README,
+these release notes, and all of the public docs — writes the helper as
+`Crossdeck.appAccountTokenForCurrentIdentity()` (static syntax), but 1.5.1
+declared it `public func` (instance only). Pasting the documented snippet
+produced `Instance member 'appAccountTokenForCurrentIdentity' cannot be used
+on type 'Crossdeck'` on first build. Caught by a dogfood integrator.
+
+**Added:**
+
+- **Static overload `Crossdeck.appAccountTokenForCurrentIdentity() -> UUID`.**
+  Purely additive — Swift resolves the type-level call to the new static
+  form and `client.appAccountTokenForCurrentIdentity()` to the original
+  instance method, so both coexist and no existing caller breaks. The
+  static form delegates to the live client (`Crossdeck.current`), minting
+  and persisting through the started SDK's identity store exactly as the
+  instance method does. Before `start()` there is no store to own a
+  persisted token, so it returns a fresh anonymous `UUID` to honour the
+  non-optional "never nil" contract; the first call after `start()` mints
+  the install-stable token.
+
+  ```swift
+  let token: UUID = Crossdeck.appAccountTokenForCurrentIdentity()
+  let result = try await product.purchase(options: [
+      .appAccountToken(token)
+  ])
+  ```
+
 ## [1.5.1] — 2026-05-29
 
 **Compile-fix patch on 1.5.0.** The 1.5.0 helper signature didn't

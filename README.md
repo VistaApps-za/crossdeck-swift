@@ -201,7 +201,7 @@ let strict = CrossdeckOptions(
 >
 > If double-click doesn't open the sheet, try right-click → *Modify Package Settings* (label varies by Xcode version).
 >
-> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.2.0; }`, save, reopen.
+> **Bulletproof fallback (no Xcode UI):** quit Xcode, edit `YourProject.xcodeproj/project.pbxproj` by hand, change `requirement = { branch = main; … }` to `requirement = { kind = upToNextMajorVersion; minimumVersion = 1.0.0; }`, save, reopen.
 
 ### Package.swift
 

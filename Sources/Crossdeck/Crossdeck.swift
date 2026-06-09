@@ -955,6 +955,24 @@ public final class Crossdeck: @unchecked Sendable {
         return UUID(uuidString: stringForm) ?? UUID()
     }
 
+    /// Type-level overload so the documented call-site
+    /// `Crossdeck.appAccountTokenForCurrentIdentity()` compiles as written.
+    ///
+    /// Swift resolves `Crossdeck.appAccountTokenForCurrentIdentity()` to
+    /// this static form and `client.appAccountTokenForCurrentIdentity()`
+    /// to the instance method above — both names coexist, so this is
+    /// purely additive and breaks no existing caller.
+    ///
+    /// Delegates to the live client (`current`) so the token is minted and
+    /// persisted through the started SDK's identity store exactly as the
+    /// instance method does. If no client has been started yet there is no
+    /// store to own a persisted token, so we honour the non-optional
+    /// "never nil" contract by returning a fresh anonymous `UUID`; once you
+    /// `start()` the SDK, the first call mints the install-stable token.
+    public static func appAccountTokenForCurrentIdentity() -> UUID {
+        return current?.appAccountTokenForCurrentIdentity() ?? UUID()
+    }
+
     public func identify(
         userId: String,
         email: String? = nil,
