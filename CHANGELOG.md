@@ -4,6 +4,37 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.3] — 2026-06-09
+
+**Existing Apple subscribers now self-heal on return — no migration script.**
+The user↔subscription link for Apple lives per-purchase on the device, not in
+your backend, so there was never anything to bulk-import; ownership has to be
+backfilled as each subscriber returns. `PurchaseAutoTrack` watches
+`Transaction.updates`, but that only fires for NEW/changed transactions — a
+subscriber who bought before this build never linked until their next renewal.
+
+**Added:**
+
+- **`automaticAppleEntitlementSync` (default ON, iOS 15+).** On launch (for an
+  already-identified user) and immediately after `identify()`, the SDK sweeps
+  `Transaction.currentEntitlements` once and forwards each verified
+  subscription's signed JWS to the same `/purchases/sync` endpoint, binding
+  `originalTransactionId → developerUserId`. The existing base self-heals the
+  first time each subscriber opens the migrated build — no backend script, no
+  "Restore Purchases" tap.
+
+  This is **attribution, not access** — it only puts an owner label on a paid
+  subscription. It is deliberately silent (no per-sub `purchase.completed`
+  funnel events; one `apple.entitlements_resynced` summary event instead),
+  deduped per developerUserId per session, and idempotent (the backend derives
+  a deterministic key from the JWS), so a repeated sweep never double-counts.
+  A silent no-op for apps without Apple IAP.
+
+  Opt out with `CrossdeckOptions(automaticAppleEntitlementSync: false)`. The
+  manual path (`syncPurchases`) and the `Transaction.updates` auto-listener
+  (`automaticPurchaseTracking`) are unchanged; all three now share one
+  `/purchases/sync` closure so the wire contract never drifts.
+
 ## [1.5.2] — 2026-06-09
 
 **Compile-fix patch on 1.5.1.** Every documented call-site — the README,

@@ -180,6 +180,21 @@ public struct CrossdeckOptions: Sendable {
     /// on the existing 5-second flush timer. iOS 12+ / macOS 10.14+.
     public var enableReachabilityFlush: Bool
 
+    /// On launch (for an already-identified user) and immediately after
+    /// `identify()`, sweep `Transaction.currentEntitlements` once and bind
+    /// every verified Apple subscription to the developerUserId — so an
+    /// EXISTING subscriber base self-heals the first time each user opens a
+    /// Crossdeck-enabled build, with no migration script and no "Restore
+    /// Purchases" tap. `Transaction.updates` (see `automaticPurchaseTracking`)
+    /// only catches NEW/changed transactions; this catches the historical
+    /// ones that won't re-emit until renewal.
+    ///
+    /// Default ON: it is the migration path for Apple/Google (whose
+    /// user↔subscription link lives on the device, not your server), it is a
+    /// silent no-op for apps without Apple IAP, and the backend sync is
+    /// idempotent so a repeated sweep never double-counts. iOS 15+ only.
+    public var automaticAppleEntitlementSync: Bool
+
     public init(
         appId: String,
         publicKey: String,
@@ -198,7 +213,8 @@ public struct CrossdeckOptions: Sendable {
         autoTrack: AutoTrackConfig = .default,
         enablePerformanceMonitoring: Bool = false,
         automaticPurchaseTracking: Bool = false,
-        enableReachabilityFlush: Bool = true
+        enableReachabilityFlush: Bool = true,
+        automaticAppleEntitlementSync: Bool = true
     ) {
         self.appId = appId
         self.publicKey = publicKey
@@ -218,6 +234,7 @@ public struct CrossdeckOptions: Sendable {
         self.enablePerformanceMonitoring = enablePerformanceMonitoring
         self.automaticPurchaseTracking = automaticPurchaseTracking
         self.enableReachabilityFlush = enableReachabilityFlush
+        self.automaticAppleEntitlementSync = automaticAppleEntitlementSync
     }
 
     /// Effective base URL — `baseUrl` if set, else the production
@@ -281,6 +298,13 @@ public final class Crossdeck: @unchecked Sendable {
     /// `automaticPurchaseTracking` is false or the OS target is
     /// below iOS 15.
     private var purchaseAutoTrack: Any?
+
+    /// StoreKit 2 Transaction.currentEntitlements one-shot sweeper — nil when
+    /// `automaticAppleEntitlementSync` is false or the OS target is below
+    /// iOS 15. Fired on launch (if identified) + after `identify()` to heal
+    /// the existing Apple subscriber base. Stored as `Any?` so the property
+    /// itself carries no `@available` constraint.
+    private var appleEntitlementSync: Any?
 
     /// NSNotificationCenter observer tokens captured by
     /// [installLifecycleObservers]. Pre-v1.4.0 the `addObserver`
@@ -541,17 +565,17 @@ public final class Crossdeck: @unchecked Sendable {
         }
         #endif
 
-        // 4. StoreKit 2 Transaction.updates auto-listener.
+        // 4. StoreKit 2 integration — the Transaction.updates auto-listener
+        //    (new/changed transactions) AND the currentEntitlements sweeper
+        //    (historical relink). Both forward signed JWS payloads to the SAME
+        //    /purchases/sync endpoint via one shared closure, so manual,
+        //    automatic, and historical paths never drift in wire shape.
         #if canImport(StoreKit) && os(iOS)
-        if options.automaticPurchaseTracking {
-            if #available(iOS 15.0, *) {
-                let httpRef = http
-                let debugLogger = options.debugLogger
-                let pendingQueue = PendingPurchaseQueue(storage: storage)
-                let identityRef = identity
-                let purchaseTracker = PurchaseAutoTrack(
-                    emitTrack: weakSelf,
-                    syncBackend: { jws, originalTransactionId in
+        if #available(iOS 15.0, *) {
+            let httpRef = http
+            let debugLogger = options.debugLogger
+            let identityRef = identity
+            let appleSyncBackend: @Sendable (String, String?) async -> Result<Void, CrossdeckError> = { jws, originalTransactionId in
                         // Same backend endpoint syncPurchases() uses
                         // — single contract surface. Build the same
                         // PurchaseSyncRequest payload so server-side
@@ -633,12 +657,37 @@ public final class Crossdeck: @unchecked Sendable {
                             "error_code": typed.code,
                             "status_code": typed.statusCode.map(String.init) ?? "n/a",
                         ])
-                        return .failure(typed)
-                    },
+                return .failure(typed)
+            }
+
+            // Transaction.updates auto-listener — NEW/changed transactions.
+            // Opt-in (most apps already call syncPurchases() from their own
+            // confirmation flow and don't want duplicate work).
+            if options.automaticPurchaseTracking {
+                let pendingQueue = PendingPurchaseQueue(storage: storage)
+                let purchaseTracker = PurchaseAutoTrack(
+                    emitTrack: weakSelf,
+                    syncBackend: appleSyncBackend,
                     pendingQueue: pendingQueue
                 )
                 purchaseTracker.start()
                 self.purchaseAutoTrack = purchaseTracker
+            }
+
+            // currentEntitlements sweeper — HISTORICAL relink so an existing
+            // subscriber base self-heals. On by default; the post-identify
+            // trigger lives at the end of identify(). On launch, sweep now iff
+            // a developerUserId is already persisted (returning identified
+            // user); otherwise the first identify() supplies the owner.
+            if options.automaticAppleEntitlementSync {
+                let sweeper = AppleEntitlementSync(
+                    syncBackend: appleSyncBackend,
+                    emitTrack: weakSelf
+                )
+                self.appleEntitlementSync = sweeper
+                if let uid = identity.snapshotSync().developerUserId, !uid.isEmpty {
+                    sweeper.sweep(forUserId: uid)
+                }
             }
         }
         #endif
@@ -1106,6 +1155,20 @@ public final class Crossdeck: @unchecked Sendable {
                 ])
             }
         }
+
+        // Phase 2 — heal the existing Apple subscriber base. A subscriber who
+        // bought BEFORE this build won't re-emit on Transaction.updates until
+        // they renew, so the auto-listener alone never links them. Now that a
+        // developerUserId is set, sweep Transaction.currentEntitlements once,
+        // binding each verified subscription's originalTransactionId to this
+        // user. Deduped per userId per session; idempotent; silent no-op for
+        // apps without Apple IAP.
+        #if canImport(StoreKit) && os(iOS)
+        if #available(iOS 15.0, *),
+           let sweeper = appleEntitlementSync as? AppleEntitlementSync {
+            sweeper.sweep(forUserId: userId)
+        }
+        #endif
     }
 
     /// Manually trigger a `/identity/alias` round-trip and await the
@@ -1754,8 +1817,13 @@ public final class Crossdeck: @unchecked Sendable {
            let tracker = purchaseAutoTrack as? PurchaseAutoTrack {
             tracker.stop()
         }
+        if #available(iOS 15.0, *),
+           let sweeper = appleEntitlementSync as? AppleEntitlementSync {
+            sweeper.stop()
+        }
         #endif
         purchaseAutoTrack = nil
+        appleEntitlementSync = nil
 
         // v1.4.0 Phase 5.1 — drop every NSNotificationCenter
         // observer this client installed. Pre-v1.4.0 the
