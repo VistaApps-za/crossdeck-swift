@@ -4,6 +4,50 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — 2026-06-10
+
+**Event Envelope v1 conformance.** The Swift SDK now emits the
+server-owned Event Envelope v1 contract
+(`backend/docs/event-envelope-spec-v1.md`), closing the three Phase-0
+audit gaps for Apple. Purely additive on the wire — the v1 server
+ignores unknown fields, so this rolls out ahead of, or behind, the
+other SDKs without coordination. No public API changes.
+
+**Added:**
+
+- **`envelopeVersion: 1`** on every batch (§1). The integer schema/wire
+  version the server parses against — *"can I parse this?"* — kept
+  strictly distinct from `sdk.version` (*"which build is in the
+  wild?"*). Two questions, two fields.
+- **Per-session `seq`** on every event (§3). A non-negative integer,
+  monotonic within a session, reset to 0 at `session.started`, assigned
+  synchronously at `track()` time from a session-scoped counter owned by
+  the AutoTracker (the single owner of session state). It persists
+  across app background/foreground within a session — backgrounding
+  does NOT reset it, so a delayed flush that batches a pre-background and
+  a short-resume event never emits a duplicate seq. An ambiguous session
+  boundary (idle resume past threshold, crash recovery) mints a NEW
+  session, which resets `seq` — `seq` integrity beats session
+  continuity. `seq` round-trips through the on-disk persistence layer.
+- **Standardized top-level `context` object** (§4) promoted out of
+  `event.properties`: `os`, `osVersion`, `appVersion`, `sdkName`,
+  `sdkVersion`, `locale`, `timezone`. App-supplied super-properties and
+  event properties stay in `properties` as before — only the
+  device/platform facts move.
+- **`context.deviceModel`** — the hardware model identifier
+  (`iPhone15,2`, `Mac15,3`, …) read from `utsname.machine` (with the
+  Simulator's `SIMULATOR_MODEL_IDENTIFIER` env override). Swift
+  previously omitted device model on purpose; the v1 context schema
+  requires it from Apple platforms, so it is now collected. Omitted from
+  the wire when undetectable.
+- **`$error` events are conformant too.** Captured errors now carry a
+  real per-session `seq` (drawn from the same counter as `track()`, not
+  the default 0 that would collide with `session.started`) and the same
+  standardized `context`. `track()` and the crash path share one
+  context source (`DeviceInfo.eventContext`) so they cannot drift —
+  spec §2 makes both fields required on *every* event, not just
+  analytics ones.
+
 ## [1.5.6] — 2026-06-10
 
 **Existing Apple subscribers now self-heal even in apps that never call

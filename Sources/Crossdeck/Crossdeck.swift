@@ -848,6 +848,21 @@ public final class Crossdeck: @unchecked Sendable {
         // sessions auto-track is off; consumers can still
         // hand-supply via super-properties.
         let sessionId = AutoTracker.shared.currentSessionId()
+        // Envelope v1 §3 — assign the per-session seq SYNCHRONOUSLY
+        // here, at the deterministic moment of the track() call, NOT
+        // inside the async enqueue Task below (where scheduler luck
+        // would scramble the order the field exists to preserve). The
+        // counter lives in AutoTracker — the single owner of session
+        // state — so it resets to 0 at session.started and stays
+        // monotonic across background/foreground within a session.
+        let seq = AutoTracker.shared.nextSeq()
+        // Capture the occurrence time SYNCHRONOUSLY here too — at the same
+        // instant as `seq`, at the track() call — NOT inside the async Task
+        // below. Sampling them at different points lets a distinct-ms pair
+        // disagree (timestamp from scheduler luck vs seq from call order),
+        // and a Task-time `Date()` is no longer the true occurrence time the
+        // envelope contract promises. timestamp + seq are one sample.
+        let occurredAt = Date()
 
         // Convert caller-supplied properties to Sendable AnyCodable
         // immediately so the Task closure captures only Sendable
@@ -862,6 +877,13 @@ public final class Crossdeck: @unchecked Sendable {
         for (k, v) in sanitisedProperties { codedProperties[k] = AnyCodable(v) }
         let codedSnapshot = codedProperties
         let devicePayload = device.asPayload
+        // Envelope v1 §4 — the standardized `context` object, the
+        // promoted-out device/platform facts that travel as a TOP-LEVEL
+        // wire object (distinct from `devicePayload`/super-property
+        // merge above, which stays in `properties`). Built via
+        // DeviceInfo.eventContext — the SINGLE source shared with the
+        // $error path so the two can never drift on field names.
+        let wireContext = device.eventContext
 
         Task {
             // v1.4.0 Phase 3.2 — super-property merge order parity.
@@ -894,8 +916,10 @@ public final class Crossdeck: @unchecked Sendable {
             let event = WireEvent(
                 id: "evt_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""),
                 name: name,
-                timestamp: Date(),
+                timestamp: occurredAt,
+                seq: seq,
                 properties: coded,
+                context: wireContext,
                 anonymousId: identitySnapshot.anonymousId,
                 developerUserId: identitySnapshot.developerUserId,
                 crossdeckCustomerId: identitySnapshot.crossdeckCustomerId
@@ -1970,6 +1994,15 @@ public final class Crossdeck: @unchecked Sendable {
             self?.snapshotErrorState() ?? ([:], [:], nil)
         }
 
+        // Envelope v1 §4 — standardized `context` for $error events too
+        // (spec §2 marks `context` required on EVERY event, not just
+        // track()s). Snapshot ONCE here at install: DeviceInfo is
+        // immutable for the process, so this is identical to what a live
+        // build would produce, and capturing a plain value keeps the
+        // crash path free of an actor hop or a weak-self deref (the same
+        // sub-second-under-crash discipline as the sync identity read).
+        let errorContext = device.eventContext
+
         ErrorCapture.shared.install(
             beforeSend: nil, // runtime hook applied inside capture closure
 
@@ -2067,7 +2100,16 @@ public final class Crossdeck: @unchecked Sendable {
                     id: "err_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""),
                     name: "$error",
                     timestamp: event.timestamp,
+                    // Envelope v1 §3 — draw a real per-session seq from the
+                    // single session-scoped counter, exactly as track() does.
+                    // Leaving it to default 0 would stamp EVERY error with
+                    // seq 0 (the value reserved for session.started), breaking
+                    // the same-timestamp tiebreak the field exists for.
+                    seq: AutoTracker.shared.nextSeq(),
                     properties: props,
+                    // Envelope v1 §4 — the standardized device context,
+                    // shared single source with track() (see install above).
+                    context: errorContext,
                     anonymousId: identitySnapshot.anonymousId,
                     developerUserId: identitySnapshot.developerUserId,
                     crossdeckCustomerId: identitySnapshot.crossdeckCustomerId

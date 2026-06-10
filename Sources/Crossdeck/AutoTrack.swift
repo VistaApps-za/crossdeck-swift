@@ -138,6 +138,21 @@ final class AutoTracker: @unchecked Sendable {
     private var sessionEndEmitted: Bool = false
     private var resumeThreshold: TimeInterval = 30 * 60
 
+    // Event Envelope v1 §3 — per-session monotonic sequence counter.
+    // The NEXT seq to hand out for this session. Reset to 0 inside
+    // `startSession` BEFORE `session.started` is emitted, so that
+    // event itself receives seq 0 and every later event in the session
+    // strictly increases. It is NOT touched by background/foreground:
+    // backgrounding ends the session but leaves the counter intact, so
+    // a delayed flush that batches a pre-background and a short-resume
+    // event never emits a duplicate seq. A genuinely NEW session
+    // (resume past idle threshold, register, manual reset, crash
+    // recovery) goes through `startSession`, which resets it — the
+    // spec's "ambiguous boundary → new session" choice (§3.2) thus
+    // carries a clean seq reset for free, because every new session id
+    // is minted in exactly one place.
+    private var seqCounter: Int = 0
+
     // Config bitmap — any listener with a feature ON enables that
     // pathway. We aggregate so multi-instance test setups don't
     // need to coordinate.
@@ -213,6 +228,11 @@ final class AutoTracker: @unchecked Sendable {
         sessionId = id
         sessionStartedAt = Date()
         sessionEndEmitted = false
+        // Envelope v1 §3 — reset the per-session seq at session.started.
+        // Reset HERE, under the same lock that mints the new id and
+        // BEFORE emitting, so the very next `nextSeq()` (which the
+        // session.started event itself pulls via track()) returns 0.
+        seqCounter = 0
         lock.unlock()
         emit("session.started", ["sessionId": id, "reason": reason])
     }
@@ -253,6 +273,22 @@ final class AutoTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return sessionEndEmitted ? nil : sessionId
+    }
+
+    /// Envelope v1 §3 — hand out the next per-session seq and advance
+    /// the counter. Called synchronously by `Crossdeck.track()` at the
+    /// moment of the call (NOT inside the async enqueue Task), so the
+    /// seq order matches the deterministic call order rather than
+    /// scheduler luck. Monotonic within a session; reset to 0 by
+    /// `startSession`. Thread-safe via the same lock that guards
+    /// session state, so the reset-then-increment at a session boundary
+    /// is atomic w.r.t. concurrent track() callers.
+    func nextSeq() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let s = seqCounter
+        seqCounter += 1
+        return s
     }
 
     // MARK: - Lifecycle observers

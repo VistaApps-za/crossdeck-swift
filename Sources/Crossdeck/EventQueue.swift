@@ -34,7 +34,19 @@ public struct WireEvent: Sendable, Codable {
     public let id: String
     public let name: String
     public let timestamp: Date
+    /// Event Envelope v1 §3 — per-session monotonic sequence number.
+    /// Assigned at enqueue/track time from the session-scoped counter
+    /// (see `AutoTracker.nextSeq`), reset to 0 at `session.started`.
+    /// The deterministic tiebreak for events sharing a `timestamp`.
+    /// Persisted on disk alongside the event so a delayed flush across
+    /// a background/foreground cycle keeps its original seq.
+    public let seq: Int
     public let properties: [String: AnyCodable]
+    /// Event Envelope v1 §4 — standardized device/platform context,
+    /// promoted OUT of `properties` into one named object. Flat string
+    /// map: `os`, `osVersion`, `appVersion`, `sdkName`, `sdkVersion`,
+    /// `locale`, `timezone`, plus Apple's `deviceModel`.
+    public let context: [String: String]
 
     // Canonical Web/Node/RN bank-grade rule: ship EVERY known
     // identity axis on every event. The backend's dedup + merge
@@ -54,7 +66,9 @@ public struct WireEvent: Sendable, Codable {
         id: String,
         name: String,
         timestamp: Date,
+        seq: Int = 0,
         properties: [String: AnyCodable],
+        context: [String: String] = [:],
         anonymousId: String,
         developerUserId: String?,
         crossdeckCustomerId: String? = nil
@@ -62,7 +76,9 @@ public struct WireEvent: Sendable, Codable {
         self.id = id
         self.name = name
         self.timestamp = timestamp
+        self.seq = seq
         self.properties = properties
+        self.context = context
         self.anonymousId = anonymousId
         self.developerUserId = developerUserId
         self.crossdeckCustomerId = crossdeckCustomerId
@@ -407,13 +423,18 @@ public actor EventQueue {
     // MARK: - Helpers
 
     private func encodeBatch(_ events: [WireEvent]) -> Data {
-        // NorthStar §13.1 batch envelope. The backend validator
-        // matches on exactly these four top-level keys:
-        //   appId, environment, sdk: {name, version}, events
-        // Field naming is camelCase across the entire wire format,
-        // matching the Web/Node/RN SDKs and the backend ClickHouse
-        // schema. Drift here causes silent ingest rejection.
+        // Event Envelope v1 batch envelope (backend/docs/
+        // event-envelope-spec-v1.md §1). Top-level keys:
+        //   envelopeVersion, appId, environment, sdk: {name, version}, events
+        // `envelopeVersion` is the schema/wire version the server
+        // parses against ("can I parse this?") and is DISTINCT from
+        // `sdk.version` ("which build is in the wild?") — two
+        // questions, two fields, never conflated (spec §1). Integer 1;
+        // bumped only on a breaking wire change. Field naming is
+        // camelCase across the entire wire format, matching the
+        // Web/Node/RN SDKs. Drift here causes silent ingest rejection.
         let body: [String: Any] = [
+            "envelopeVersion": 1,
             "appId": envelope.appId,
             "environment": envelope.environment.rawValue,
             "sdk": [
@@ -446,6 +467,13 @@ public actor EventQueue {
             // ClickHouse `timestamp_ms` column. ISO 8601 strings
             // would fail the validator's `number` type check.
             "timestamp": Int(event.timestamp.timeIntervalSince1970 * 1000),
+            // Envelope v1 §3 — per-session monotonic sequence; the
+            // deterministic tiebreak for events sharing a timestamp.
+            "seq": event.seq,
+            // Envelope v1 §4 — standardized device/platform context,
+            // promoted out of `properties`. Omitted (empty object) when
+            // no device snapshot is available.
+            "context": event.context,
             "anonymousId": event.anonymousId,
             "properties": properties,
         ]
