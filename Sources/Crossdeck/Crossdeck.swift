@@ -301,9 +301,9 @@ public final class Crossdeck: @unchecked Sendable {
 
     /// StoreKit 2 Transaction.currentEntitlements one-shot sweeper — nil when
     /// `automaticAppleEntitlementSync` is false or the OS target is below
-    /// iOS 15. Fired on launch (if identified) + after `identify()` to heal
-    /// the existing Apple subscriber base. Stored as `Any?` so the property
-    /// itself carries no `@available` constraint.
+    /// iOS 15. Fired on EVERY launch (identified or anonymous) + after
+    /// `identify()` to heal the existing Apple subscriber base. Stored as
+    /// `Any?` so the property itself carries no `@available` constraint.
     private var appleEntitlementSync: Any?
 
     /// Learned productId → entitlement-key map (Phase 3, the ACCESS half).
@@ -689,18 +689,25 @@ public final class Crossdeck: @unchecked Sendable {
 
             // currentEntitlements sweeper — HISTORICAL relink so an existing
             // subscriber base self-heals. On by default; the post-identify
-            // trigger lives at the end of identify(). On launch, sweep now iff
-            // a developerUserId is already persisted (returning identified
-            // user); otherwise the first identify() supplies the owner.
+            // trigger lives at the end of identify(). Sweep on EVERY launch,
+            // identified or not: discovery doesn't need a named owner, only
+            // the install-stable appAccountToken the sync attaches. An
+            // anonymous-only app's existing subscribers therefore reach the
+            // dashboard on first launch (server attributes them to the
+            // install, then re-attributes to the user on the first
+            // identify()). Dedupe on developerUserId when present, else the
+            // always-present anonymousId.
             if options.automaticAppleEntitlementSync {
                 let sweeper = AppleEntitlementSync(
                     syncBackend: appleSyncBackend,
                     emitTrack: weakSelf
                 )
                 self.appleEntitlementSync = sweeper
-                if let uid = identity.snapshotSync().developerUserId, !uid.isEmpty {
-                    sweeper.sweep(forUserId: uid)
-                }
+                let snap = identity.snapshotSync()
+                let sweepKey = (snap.developerUserId?.isEmpty == false
+                    ? snap.developerUserId
+                    : nil) ?? snap.anonymousId
+                sweeper.sweep(dedupeKey: sweepKey)
             }
 
             // Phase 3 — ACCESS. Always-on (not opt-in): begin mirroring this
@@ -1189,14 +1196,15 @@ public final class Crossdeck: @unchecked Sendable {
         // Phase 2 — heal the existing Apple subscriber base. A subscriber who
         // bought BEFORE this build won't re-emit on Transaction.updates until
         // they renew, so the auto-listener alone never links them. Now that a
-        // developerUserId is set, sweep Transaction.currentEntitlements once,
-        // binding each verified subscription's originalTransactionId to this
-        // user. Deduped per userId per session; idempotent; silent no-op for
-        // apps without Apple IAP.
+        // developerUserId is set, sweep Transaction.currentEntitlements once
+        // more so the server re-attributes each subscription's
+        // originalTransactionId from the install to this user (via the
+        // appAccountToken the sync attaches). Deduped per key per session;
+        // idempotent server-side; silent no-op for apps without Apple IAP.
         #if canImport(StoreKit) && os(iOS)
         if #available(iOS 15.0, *),
            let sweeper = appleEntitlementSync as? AppleEntitlementSync {
-            sweeper.sweep(forUserId: userId)
+            sweeper.sweep(dedupeKey: userId)
         }
         #endif
     }

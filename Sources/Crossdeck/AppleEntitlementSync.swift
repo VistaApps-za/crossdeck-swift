@@ -9,11 +9,19 @@
 //
 // `Transaction.currentEntitlements` is the missing half: the full set of
 // currently-active entitlements on THIS device, right now, historical ones
-// included. Sweeping it once per identified session forwards each verified
-// transaction's signed JWS to the SAME `/purchases/sync` endpoint, binding
-// `originalTransactionId → developerUserId`. That is how the existing base
-// self-heals the first time each subscriber opens the migrated build — no
-// backend migration script, no "Restore Purchases" tap.
+// included. Sweeping it once per session forwards each verified
+// transaction's signed JWS to the SAME `/purchases/sync` endpoint with the
+// install-stable appAccountToken. That is how the existing base self-heals
+// the first time each subscriber opens the migrated build — no backend
+// migration script, no "Restore Purchases" tap.
+//
+// Identity is NOT required. For an identified install the server binds
+// `originalTransactionId → developerUserId`. For an anonymous install (an
+// app that never calls `identify()`) the server attributes the subscription
+// to the install itself via the appAccountToken, then re-attributes it to
+// the user automatically on the first `identify()` that carries the token —
+// so an anonymous-only app's revenue is visible on the dashboard from day
+// one, and an app that adds auth later loses nothing.
 //
 // ATTRIBUTION, not ACCESS. This sweep only puts an owner label on a paid
 // subscription. A returning subscriber's ACCESS rides on their device's
@@ -39,13 +47,15 @@ final class AppleEntitlementSync: @unchecked Sendable {
     private let syncBackend: SyncBackend
     private let emitTrack: EmitTrack
     private let lock = NSLock()
-    // Per-session dedupe. A sweep is attribution — it only needs to run once
-    // per identity per process: `currentEntitlements` is the same set until a
-    // new purchase lands (which `Transaction.updates` already covers). Keying
-    // on the developerUserId we last swept for means a sign-out → different
-    // sign-in re-sweeps, while a repeated `identify()` with the SAME id
-    // (common — auth listeners re-fire on every foreground) does not.
-    private var sweptForUserId: String?
+    // Per-session dedupe. A sweep is DISCOVERY (and, when identified,
+    // attribution) — it only needs to run once per identity-state per
+    // process: `currentEntitlements` is the same set until a new purchase
+    // lands (which `Transaction.updates` already covers). The dedupe key is
+    // the developerUserId when identified, else the stable anonymousId, so:
+    // a sign-out → different sign-in re-sweeps, an anonymous→identified
+    // transition re-sweeps once, while a repeated `identify()` with the SAME
+    // id (common — auth listeners re-fire on every foreground) does not.
+    private var sweptForKey: String?
     private var inFlight = false
     private var task: Task<Void, Never>?
 
@@ -54,13 +64,21 @@ final class AppleEntitlementSync: @unchecked Sendable {
         self.emitTrack = emitTrack
     }
 
-    /// Sweep `Transaction.currentEntitlements` once for `userId`. Cheap no-op
-    /// if already swept for this user this session or a sweep is in flight.
-    /// Never throws; never blocks the caller (spawns a detached task).
-    func sweep(forUserId userId: String) {
-        guard !userId.isEmpty else { return }
+    /// Sweep `Transaction.currentEntitlements` once for `dedupeKey` (the
+    /// developerUserId when identified, else the stable anonymousId). Cheap
+    /// no-op if already swept for this key this session or a sweep is in
+    /// flight. Never throws; never blocks the caller (spawns a detached task).
+    ///
+    /// No identity is required to run: each verified transaction is forwarded
+    /// with the install-stable appAccountToken, so an anonymous install's
+    /// existing subscribers reach the backend on first launch (the server
+    /// attributes them to the install, then re-attributes to the user on the
+    /// first `identify()`). The dedupeKey only governs how often the sweep
+    /// re-runs within a process.
+    func sweep(dedupeKey: String) {
+        guard !dedupeKey.isEmpty else { return }
         lock.lock()
-        if inFlight || sweptForUserId == userId {
+        if inFlight || sweptForKey == dedupeKey {
             lock.unlock()
             return
         }
@@ -72,7 +90,7 @@ final class AppleEntitlementSync: @unchecked Sendable {
             guard let self else { return }
             self.lock.lock()
             self.inFlight = false
-            self.sweptForUserId = userId
+            self.sweptForKey = dedupeKey
             self.task = nil
             self.lock.unlock()
         }

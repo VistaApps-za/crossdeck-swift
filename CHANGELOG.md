@@ -4,6 +4,32 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.6] — 2026-06-10
+
+**Existing Apple subscribers now self-heal even in apps that never call
+`identify()`.** The 1.5.3 launch sweep of `Transaction.currentEntitlements`
+only fired when a `developerUserId` was already persisted, so an
+anonymous-only app (no login, every user anonymous for the life of the
+install) never forwarded its existing Apple subscribers to Crossdeck — the
+dashboard showed no revenue while the entitlement still worked on-device.
+Discovery does not need a named owner: each verified transaction is forwarded
+with the install-stable `appAccountToken`, so the server attributes the
+subscription to the install and re-attributes it to the user automatically on
+the first `identify()` that carries the token.
+
+**Changed:**
+
+- The launch-time `currentEntitlements` sweep now runs on **every launch,
+  identified or not** (gated only by `automaticAppleEntitlementSync`, still on
+  by default). The per-session dedupe key is the `developerUserId` when
+  identified, else the always-present `anonymousId`, so an
+  anonymous→identified transition re-sweeps exactly once and a repeated
+  same-id `identify()` does not.
+- The family-shared skip (1.5.5) is unchanged — a family-shared transaction is
+  still never attributed.
+
+No public API changes; access behaviour is unchanged.
+
 ## [1.5.5] — 2026-06-09
 
 **Matching discipline: never attribute a family-shared subscription.** The
