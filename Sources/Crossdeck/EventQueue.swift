@@ -149,6 +149,15 @@ public struct AnyCodable: @unchecked Sendable, Codable {
 /// user-visible diagnostic for invalid_request_error cases.
 public typealias PermanentFailureHandler = @Sendable (_ events: [WireEvent], _ error: CrossdeckError) -> Void
 
+/// Callback invoked when the server PARKS this SDK (HTTP 426 /
+/// `sdk_version_unsupported`): the wire dialect is too old. Unlike
+/// `PermanentFailureHandler`, the events are NOT lost — they're held in
+/// the durable queue and delivered on the next launch after the app
+/// upgrades the SDK. The host surfaces this to the developer console once
+/// and to the dashboard via the heartbeat. `minVersion` is the required
+/// floor when the server supplies it.
+public typealias ParkedHandler = @Sendable (_ minVersion: String?, _ surface: String?) -> Void
+
 public struct EventQueueConfig: Sendable {
     public var batchSize: Int = 20
     /// v1.4.0 Phase 3.3 — flush interval default parity at 2000ms
@@ -196,7 +205,18 @@ public actor EventQueue {
     private let envelope: EventQueueEnvelope
     private let logger: DebugLogger
     private let onPermanentFailure: PermanentFailureHandler?
+    private let onParked: ParkedHandler?
     private let config: EventQueueConfig
+
+    /// PARK state (HTTP 426 / `sdk_version_unsupported`). Once parked, the
+    /// queue stops flushing — retrying a known-too-old payload only wastes
+    /// the device's battery and bandwidth until the app ships an upgraded
+    /// SDK. The held events stay durable (disk) and deliver on the next
+    /// launch's rehydrate, post-upgrade. Per-instance: a fresh launch starts
+    /// unparked, retries once, and either delivers (upgraded) or re-parks.
+    private var parked: Bool = false
+    /// One developer-facing console warning per process — never per-event spam.
+    private var parkWarned: Bool = false
 
     /// One-shot guard for `sdk.first_event_sent`. The dashboard
     /// onboarding checklist fires when it sees this signal, so it
@@ -218,6 +238,7 @@ public actor EventQueue {
         envelope: EventQueueEnvelope,
         logger: @escaping DebugLogger = noopDebugLogger,
         onPermanentFailure: PermanentFailureHandler? = nil,
+        onParked: ParkedHandler? = nil,
         config: EventQueueConfig = EventQueueConfig()
     ) {
         self.http = http
@@ -225,6 +246,7 @@ public actor EventQueue {
         self.envelope = envelope
         self.logger = logger
         self.onPermanentFailure = onPermanentFailure
+        self.onParked = onParked
         self.config = config
 
         // Rehydrate inline. Method calls from actor init flag
@@ -266,6 +288,12 @@ public actor EventQueue {
     }
 
     public func flush() async {
+        // PARK hush: once the server has rejected our wire dialect as too
+        // old (426), every flush of the same-format payload fails
+        // identically. Hold — don't flush — until the next launch on an
+        // upgraded SDK. The events stay buffered + persisted, so they
+        // deliver on that launch's rehydrate.
+        if parked { return }
         if pendingBatch == nil {
             // Promote a fresh batch from the head of the buffer.
             guard !buffer.isEmpty else { return }
@@ -338,6 +366,47 @@ public actor EventQueue {
             if let handler = onPermanentFailure {
                 Task.detached { handler(events, err) }
             }
+
+        case .parked:
+            // THIRD outcome (HTTP 426 / `sdk_version_unsupported`). The data
+            // is good; only the wire dialect is stale. Keep every held event
+            // — fold the in-flight batch back to the FRONT of the buffer
+            // (oldest-first), FIFO-cap at maxBufferSize, persist (disk) so the
+            // next launch's rehydrate delivers it — then hush. The flush guard
+            // above blocks further attempts until a fresh (upgraded) launch.
+            parked = true
+            buffer.insert(contentsOf: batch.events, at: 0)
+            if buffer.count > config.maxBufferSize {
+                let overflow = buffer.count - config.maxBufferSize
+                buffer.removeFirst(overflow) // FIFO: evict oldest, keep newest
+            }
+            pendingBatch = nil
+            storage.remove(pendingStorageKey)
+            nextRetryAt = nil
+            persistBuffer()
+            let minVersion = outcome.error?.minVersion
+            let surface = outcome.error?.surface
+            // Distinct signal (NOT sdkFlushPermanentFailure — nothing was
+            // dropped). The dashboard reads sdk.parked for the amber advisory.
+            logger(.sdkParked, [
+                "status": "426",
+                "min_version": minVersion ?? "n/a",
+                "surface": surface ?? "n/a",
+            ])
+            if !parkWarned {
+                parkWarned = true
+                // ONE developer-facing console line — the terminal/Xcode-side
+                // cure that reaches them mid-debug, paired with the dashboard
+                // banner. Printed unconditionally (not gated on debug logging).
+                let floor = minVersion.map { " to >= \($0)" } ?? ""
+                print(
+                    "[Crossdeck] SDK outdated — the server is no longer accepting "
+                    + "this version's event format. Your events are PARKED on-device "
+                    + "(held, not lost) and will deliver automatically once you "
+                    + "update the Crossdeck SDK\(floor) and ship a new build."
+                )
+            }
+            onParked?(minVersion, surface)
 
         case .retryable:
             batch.attempt += 1

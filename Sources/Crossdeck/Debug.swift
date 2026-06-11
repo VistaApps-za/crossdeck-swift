@@ -74,6 +74,12 @@ public enum DebugSignal: String, Sendable {
     /// dropped events are routed to `onPermanentFailure` if set.
     case sdkFlushPermanentFailure = "sdk.flush_permanent_failure"
 
+    /// Server PARKED the SDK (HTTP 426 / sdk_version_unsupported): the wire
+    /// dialect is too old. Distinct from sdkFlushPermanentFailure — events
+    /// are HELD on the disk queue (not dropped) and deliver on the next
+    /// launch after upgrade. The dashboard reads it for the amber advisory.
+    case sdkParked = "sdk.parked"
+
     /// Consent state changed via `setConsent(...)`.
     case sdkConsentChanged = "sdk.consent_changed"
 

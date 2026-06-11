@@ -91,6 +91,76 @@ final class EventQueueIntegrationTests: XCTestCase {
         XCTAssertEqual(stats.buffered, 3)
     }
 
+    // MARK: - PARK (HTTP 426 / sdk_version_unsupported)
+
+    /// A StubProtocol-backed client so flush() sees a real 426. Mirrors
+    /// HttpRetryAndIdempotencyTests.makeClient().
+    private func makeStubClient() -> HTTPClient {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubProtocol.self]
+        return HTTPClient(
+            endpoint: URL(string: "https://stub.invalid/v1/events")!,
+            publicKey: "cd_pub_test_stub",
+            session: URLSession(configuration: cfg)
+        )
+    }
+
+    /// Acceptance: a version-rejected SDK RETAINS its queue (never drops),
+    /// signals onParked with the floor, and the held + persisted events
+    /// deliver on the next (upgraded) launch — "held on-device, resumes on
+    /// upgrade" proven on Swift's disk queue.
+    func test_queue_parksOn426_retainsEventsAndBackfillsAfterUpgrade() async {
+        StubProtocol.reset()
+        final class ParkBox: @unchecked Sendable { var minVersion: String?; var surface: String? }
+        let box = ParkBox()
+        let storage = MemoryStorage()
+
+        // Old SDK: server PARKS it (426). Events held + persisted, never dropped.
+        StubProtocol.script = [.ok(
+            426,
+            body: #"{"error":{"type":"invalid_request_error","code":"sdk_version_unsupported","message":"too old","minVersion":"1.6.0","surface":"swift"}}"#,
+            retryAfter: nil
+        )]
+        do {
+            let queue = EventQueue(
+                http: makeStubClient(),
+                storage: storage,
+                envelope: makeEnvelope(),
+                onParked: { minV, surf in box.minVersion = minV; box.surface = surf },
+                config: makeBatchConfig(batchSize: 10)
+            )
+            await queue.enqueue(makeWireEvent(name: "held1"))
+            await queue.enqueue(makeWireEvent(name: "held2"))
+            await queue.flush()
+            let stats = await queue.stats()
+            // Held, NOT dropped — folded back to the buffer.
+            XCTAssertEqual(stats.buffered, 2)
+            XCTAssertEqual(box.minVersion, "1.6.0")
+            XCTAssertEqual(box.surface, "swift")
+            // Hushed: a second flush makes no further request.
+            StubProtocol.reset()
+            await queue.flush()
+            XCTAssertNil(StubProtocol.lastRequest) // no HTTP attempted while parked
+        }
+
+        // Upgrade: a FRESH queue (unparked) rehydrates the SAME storage; the
+        // server now accepts the events (202) → backfill delivered.
+        StubProtocol.reset()
+        StubProtocol.script = [.ok(202, body: "{}", retryAfter: nil)]
+        let upgraded = EventQueue(
+            http: makeStubClient(),
+            storage: storage,
+            envelope: makeEnvelope(),
+            config: makeBatchConfig(batchSize: 100)
+        )
+        let before = await upgraded.stats()
+        XCTAssertEqual(before.buffered, 2) // rehydrated the held events
+        await upgraded.flush()
+        let after = await upgraded.stats()
+        XCTAssertEqual(after.buffered, 0) // delivered (backfill)
+        XCTAssertNotNil(StubProtocol.lastRequest)
+    }
+
     // MARK: - Event Envelope v1 wire shape (spec §3, §4)
 
     /// Envelope v1 §3/§4 — a WireEvent carries the per-session `seq`

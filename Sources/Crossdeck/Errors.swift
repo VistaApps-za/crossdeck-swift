@@ -29,6 +29,12 @@ public enum CrossdeckErrorType: String, Sendable, Codable {
     /// Rate limit hit. Honour the `Retry-After` header if present.
     case rateLimit = "rate_limit_error"
 
+    /// HTTP 426 — the SDK's event format is too old for the server. The
+    /// queue PARKS on it: events are held on the disk queue (paused, not
+    /// lost) and deliver on the next launch after upgrade. Distinct from a
+    /// permanent drop — the data is good, only the wire dialect is stale.
+    case versionError = "version_error"
+
     /// Server-side issue (5xx). Safe to retry with backoff. Aligned
     /// with the backend's `ApiErrorType` wire vocabulary
     /// (`backend/src/api/v1-errors.ts`) as of v1.4.0 — the prior
@@ -92,18 +98,30 @@ public struct CrossdeckError: Error, Sendable {
     /// integration) from 5xx (transient — wait and retry).
     public let statusCode: Int?
 
+    /// Required SDK version floor — populated only on a `426 Upgrade
+    /// Required` / `sdk_version_unsupported` response, so the PARK message
+    /// names the exact version to update to.
+    public let minVersion: String?
+
+    /// SDK surface the rejection applies to (web/node/swift/…), on a 426.
+    public let surface: String?
+
     public init(
         type: CrossdeckErrorType,
         code: String,
         message: String,
         requestId: String? = nil,
-        statusCode: Int? = nil
+        statusCode: Int? = nil,
+        minVersion: String? = nil,
+        surface: String? = nil
     ) {
         self.type = type
         self.code = code
         self.message = message
         self.requestId = requestId
         self.statusCode = statusCode
+        self.minVersion = minVersion
+        self.surface = surface
     }
 }
 
@@ -133,9 +151,12 @@ struct ServerErrorEnvelope: Decodable, Sendable {
         let code: String?
         let message: String?
         let requestId: String?
+        /// PARK metadata, present only on a 426 / sdk_version_unsupported body.
+        let minVersion: String?
+        let surface: String?
 
         enum CodingKeys: String, CodingKey {
-            case type, code, message
+            case type, code, message, minVersion, surface
             case requestId = "request_id"
         }
     }
@@ -163,7 +184,9 @@ func crossdeckErrorFrom(
             code: envelope.error.code ?? codeForStatus(response.statusCode),
             message: envelope.error.message ?? defaultMessageForStatus(response.statusCode),
             requestId: envelope.error.requestId ?? requestId,
-            statusCode: response.statusCode
+            statusCode: response.statusCode,
+            minVersion: envelope.error.minVersion,
+            surface: envelope.error.surface
         )
     }
 

@@ -36,7 +36,11 @@ public struct HTTPResponseEnvelope: Sendable {
 }
 
 public struct HTTPSendOutcome: Sendable {
-    public enum Kind: Sendable { case success, retryable, permanent }
+    /// `parked` is the THIRD outcome (HTTP 426 / `sdk_version_unsupported`):
+    /// the wire dialect is too old. Distinct from `permanent` (drop — the
+    /// request is invalid) and `retryable` (transient). The data is good;
+    /// hold it, hush, and deliver on the next launch after an SDK upgrade.
+    public enum Kind: Sendable { case success, retryable, permanent, parked }
     public let kind: Kind
     public let envelope: HTTPResponseEnvelope?
     public let error: CrossdeckError?
@@ -198,13 +202,21 @@ public actor HTTPClient {
                 return HTTPSendOutcome(kind: .success, envelope: envelope, error: nil)
             }
 
+            let status = httpResponse.statusCode
+            let err = crossdeckErrorFrom(response: httpResponse, body: data)
+
+            // 426 Upgrade Required → PARK, checked BEFORE the permanent-4xx
+            // classification so a version-rejection never drops. The status
+            // invented for exactly this ("your client is too old"); no proxy
+            // emits it spuriously the way a dozen layers can produce 400/422.
+            if status == 426 {
+                return HTTPSendOutcome(kind: .parked, envelope: envelope, error: err)
+            }
+
             // 4xx (excluding 408 + 429) → permanent. Caller fix needed.
             // 408 is request timeout — server-side hint to retry.
             // 429 is rate limit — retry with Retry-After.
-            let status = httpResponse.statusCode
             let isPermanent4xx = (400...499).contains(status) && status != 408 && status != 429
-
-            let err = crossdeckErrorFrom(response: httpResponse, body: data)
 
             if isPermanent4xx {
                 return HTTPSendOutcome(kind: .permanent, envelope: envelope, error: err)

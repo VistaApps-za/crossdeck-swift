@@ -4,6 +4,28 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — 2026-06-11
+
+**PARK on version-rejection — events are held, never dropped.** A third
+event-queue outcome for the day the server stops accepting an outdated event
+format. Purely additive; no public API change.
+
+**Added:**
+
+- **PARK (HTTP `426` / `sdk_version_unsupported`).** A version-rejection is now
+  its own `HTTPSendOutcome.Kind.parked`, distinct from `.permanent` (drop) and
+  `.retryable` (transient): the data is good, only the wire dialect is stale.
+  The queue **holds** the events (folded to the front of the on-disk queue,
+  capped at `maxBufferSize`), **hushes** (stops flushing a known-too-old
+  payload), **signals** once (one `print` line + a `sdk.parked` debug event),
+  and **backfills** on the next launch after upgrade. "Paused, not lost — held
+  on-device, resumes on upgrade."
+- **`CrossdeckErrorType.versionError`** (`"version_error"`); `CrossdeckError`
+  carries `minVersion` / `surface` from the 426 body so the PARK message names
+  the exact version. New `onParked` queue handler.
+
+See https://cross-deck.com/docs/sdk-event-durability/ for the durability contract.
+
 ## [1.6.0] — 2026-06-10
 
 **Event Envelope v1 conformance.** The Swift SDK now emits the

@@ -73,6 +73,26 @@ final class HttpRetryAndIdempotencyTests: XCTestCase {
         XCTAssertEqual(outcome.kind, .permanent)
     }
 
+    // MARK: - 426 is PARKED (not permanent, not retryable)
+
+    /// HTTP 426 Upgrade Required → the THIRD outcome `.parked`. Distinct
+    /// from the permanent-4xx drop (the data is good, only the wire dialect
+    /// is stale) and parsed with the server's `minVersion`/`surface` so the
+    /// PARK cure names the exact version.
+    func test_send_classifies426AsParked_withMinVersionAndSurface() async {
+        StubProtocol.script = [.ok(
+            426,
+            body: #"{"error":{"type":"invalid_request_error","code":"sdk_version_unsupported","message":"too old","minVersion":"1.6.0","surface":"swift"}}"#,
+            retryAfter: nil
+        )]
+        let client = makeClient()
+        let outcome = await client.send(body: Data("{}".utf8), idempotencyKey: "cdbatch_park_1")
+        XCTAssertEqual(outcome.kind, .parked)
+        XCTAssertEqual(outcome.error?.code, "sdk_version_unsupported")
+        XCTAssertEqual(outcome.error?.minVersion, "1.6.0")
+        XCTAssertEqual(outcome.error?.surface, "swift")
+    }
+
     // MARK: - 5xx + 408 + 429 are retryable
 
     func test_send_classifies500AsRetryable() async {
