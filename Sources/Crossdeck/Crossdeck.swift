@@ -568,7 +568,7 @@ public final class Crossdeck: @unchecked Sendable {
 
         // 3. MetricKit perf vitals — daily aggregates + near-real-
         //    time diagnostics.
-        #if canImport(MetricKit) && !os(watchOS) && !os(tvOS)
+        #if canImport(MetricKit) && !os(watchOS) && !os(tvOS) && !os(macOS)
         if options.enablePerformanceMonitoring {
             if #available(iOS 14.0, macOS 12.0, *) {
                 let perf = PerformanceVitals(emit: weakSelf)
@@ -1905,7 +1905,7 @@ public final class Crossdeck: @unchecked Sendable {
         }
         reachability = nil
 
-        #if canImport(MetricKit) && !os(watchOS) && !os(tvOS)
+        #if canImport(MetricKit) && !os(watchOS) && !os(tvOS) && !os(macOS)
         if #available(iOS 14.0, macOS 12.0, *),
            let perf = performanceVitals as? PerformanceVitals {
             perf.stop()

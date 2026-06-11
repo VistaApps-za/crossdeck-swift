@@ -24,7 +24,10 @@
 
 import Foundation
 
-#if canImport(MetricKit) && !os(watchOS) && !os(tvOS)
+// MXMetricPayload / MXDiagnosticPayload are iOS-family only — MetricKit is
+// importable on macOS but these payload APIs are unavailable there, so the
+// macOS build (e.g. the release.yml gate on macos-14) must exclude this block.
+#if canImport(MetricKit) && !os(watchOS) && !os(tvOS) && !os(macOS)
 import MetricKit
 
 @available(iOS 14.0, macOS 12.0, *)
