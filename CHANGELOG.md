@@ -4,6 +4,17 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] — 2026-06-11
+
+Docs-only patch — no code changes.
+
+- README brought current with the shipped reality: v1.7.0 status header (PARK
+  + first machine-tested release), PARK durability section under the Events
+  contracts, corrected install pins (1.7.x), per-language invalid-input
+  semantics, and the quickstart example's `CrossdeckEnvironment` type fix.
+  Cut as a release so SPM consumers (Xcode resolves the README at the version
+  tag) see current docs instead of the pre-1.7.0 snapshot.
+
 ## [1.7.0] — 2026-06-11
 
 **PARK on version-rejection — events are held, never dropped.** A third

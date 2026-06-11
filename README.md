@@ -2,11 +2,24 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.5.0 — bank-grade Apple-rail Shape 2 fix.** Closes
-> the identity-key mismatch trap that shipped silently in v1.4.x's
-> `AppAccountTokenDerivation`. See [`CHANGELOG.md`](./CHANGELOG.md)
-> and the "Apple in-app purchase: bank-grade attribution" section
-> below for the one-line code change at your purchase site.
+> **Status: v1.7.0 — PARK on version-rejection + machine-tested
+> input safety.** If the server ever stops accepting this SDK
+> version's event format (HTTP `426` / `sdk_version_unsupported`),
+> events are **parked, not lost** — held on-disk, flushing hushes,
+> one signal names the version to update to, and everything
+> backfills after you ship an upgrade. v1.7.0 is also the first
+> Swift release verified by CI before publication: every public
+> fire-and-forget entry point is machine-tested to survive
+> empty/garbage input in both Debug and Release configuration —
+> `track("")` / `identify("")` / `breadcrumbCapacity: 0` can never
+> crash a host app (dropped with a debug-log signal instead;
+> `identifyAndWait` is the throwing variant for callers who want
+> the typed `missing_user_id` error).
+>
+> v1.5.0 closed the Apple-rail Shape 2 identity-key mismatch trap
+> in `AppAccountTokenDerivation` — see the "Apple in-app purchase:
+> bank-grade attribution" section below for the one-line code
+> change at your purchase site.
 >
 > v1.4.x closed the bank-grade reconciliation pillars —
 > deterministic Idempotency-Key on every purchase sync, wire-vocab
@@ -186,7 +199,7 @@ let strict = CrossdeckOptions(
    https://github.com/VistaApps-za/crossdeck-swift.git
    ```
 
-3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.2.0`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
+3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.7.0`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
 4. Click **Add Package**. Xcode resolves the package and offers to add the `Crossdeck` library product to your app target — accept.
 
 > **If your Xcode UI already shows `Dependency Rule: Branch — main` from a pre-v1.0.0 add**, the *File → Add Package Dependencies…* dialog is hard-blocked from changing rules on already-added packages — the Dependency Rule dropdown greys out with "already depends on … with rule main" at the bottom. Removing and re-adding usually loops, too: Xcode's *Recently Used* auto-suggests the package back in with the dropdown still greyed.
@@ -197,7 +210,7 @@ let strict = CrossdeckOptions(
 > 2. In the editor pane, select your project under the **PROJECT** column — **not** under TARGETS (the rule editor only lives on the project, not the target).
 > 3. Click the **Package Dependencies** tab.
 > 4. **Double-click** the `crossdeck-swift` row. A sheet opens with the Dependency Rule editor — this is the only UI in Xcode that can change a rule on an already-added package.
-> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.2.0`, click `Done`.
+> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.7.0`, click `Done`.
 >
 > If double-click doesn't open the sheet, try right-click → *Modify Package Settings* (label varies by Xcode version).
 >
@@ -209,12 +222,12 @@ let strict = CrossdeckOptions(
 dependencies: [
     .package(
         url: "https://github.com/VistaApps-za/crossdeck-swift.git",
-        from: "1.2.0"
+        from: "1.7.0"
     ),
 ]
 ```
 
-`from: "1.2.0"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
+`from: "1.7.0"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
 
 ## Quickstart
 
@@ -246,7 +259,7 @@ struct YourApp: App {
         let environment: CrossdeckEnvironment = .sandbox
         #else
         let publicKey = "cd_pub_live_..."
-        let environment: Environment = .production
+        let environment: CrossdeckEnvironment = .production
         #endif
         do {
             return try Crossdeck.start(options: CrossdeckOptions(
@@ -265,12 +278,19 @@ struct YourApp: App {
 Then anywhere in your app. Inside SwiftUI views use `@Environment(\.crossdeck)`; from services / view models / non-SwiftUI surfaces use the **`Crossdeck.current`** static accessor (v1.0.2+):
 
 ```swift
-// Track an event — fire-and-forget, never throws (v1.2.0+).
+// Track an event — fire-and-forget: never throws, never traps.
+// Invalid input (e.g. an empty name) is DROPPED with a debug-log
+// signal — the Swift idiom of the cross-SDK invariant "invalid
+// input never crashes your app and never reaches the wire".
+// (The JS SDKs signal the same rejection by throwing a typed
+// CrossdeckError; Swift drops + logs to keep the hot path try-free.)
 cd?.track("paywall_seen", properties: ["variant": "annual"])
 
 // Identify after sign-in. userId is YOUR auth provider's stable id
 // (Firebase Auth uid, Sign In with Apple userIdentifier, Auth0 sub,
-// Supabase id, etc.) — never a placeholder. Non-throwing in v1.2.0+.
+// Supabase id, etc.) — never a placeholder. Non-throwing; an empty
+// userId drops with a debug-log signal. Use identifyAndWait(userId:)
+// when you want the typed missing_user_id error surfaced to you.
 cd?.identify(userId: user.id, email: user.email, traits: ["plan": "pro"])
 
 // Sign-out — wipes identity + entitlement cache + super-properties +
@@ -306,7 +326,20 @@ Web, Node, and React Native SDKs.
   collapses retries to a single insert.
 - **4xx hard stop.** A permanent 4xx (auth, payload broken) is
   routed to the `onPermanentFailure` callback and dropped — it
-  will never block newer events behind a dead batch.
+  will never block newer events behind a dead batch. One deliberate
+  exception: HTTP `426` is NOT a drop — it parks (next item).
+- **Outdated-version PARK (v1.7.0).** A `426` /
+  `sdk_version_unsupported` response is its own
+  `HTTPSendOutcome.Kind.parked` outcome, distinct from retry
+  (transient) and drop (invalid): the data is good, only the wire
+  dialect is stale. The queue **holds** the events (folded to the
+  front of the on-disk queue, capped at `maxBufferSize`), **hushes**
+  (stops flushing a known-too-old payload), **signals** once (one
+  `print` line + an `sdk.parked` debug event + the `onParked`
+  handler, carrying the exact `minVersion` to update to), and
+  **backfills** on the next launch after you ship an upgraded
+  build. "Paused, not lost — held on-device, resumes on upgrade."
+  See [the durability contract](https://cross-deck.com/docs/sdk-event-durability/).
 - **`Retry-After` honoured.** Server is authoritative on its own
   rate budget. Clamped at 24h as a sanity cap.
 
@@ -470,8 +503,8 @@ guard let isolation = CrossdeckContracts.byId("per-user-cache-isolation"),
 CrossdeckContracts.byPillar(.entitlements)
 CrossdeckContracts.withStatus(.proposed)
 CrossdeckContracts.findByTestName("test_identifyB_makesAEntitlementsUnreachable")
-CrossdeckContracts.sdkVersion       // "1.4.1"
-CrossdeckContracts.bundledIn        // "@cross-deck/swift@1.4.1"
+CrossdeckContracts.sdkVersion       // "1.7.0"
+CrossdeckContracts.bundledIn        // "@cross-deck/swift@1.7.0"
 ```
 
 The `Contract` struct + `ContractPillar`/`ContractStatus`/`ContractAppliesTo` enums are public. The binary-stability promise (which fields are guaranteed across patch/minor releases) is documented inline on `Contracts.swift` and in the monorepo's [`contracts/README.md`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md).
