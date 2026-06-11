@@ -24,6 +24,24 @@ format. Purely additive; no public API change.
   carries `minVersion` / `surface` from the 426 body so the PARK message names
   the exact version. New `onParked` queue handler.
 
+**Fixed (no public API change):**
+
+- **No public API can crash the host app on bad input.** `track("")` and
+  `identify("")` used `assertionFailure` (traps in Debug builds) and
+  `CrossdeckOptions(breadcrumbCapacity: 0)` used `precondition` (traps in
+  **Release** builds — the production app). All three are gone: empty input is
+  now dropped with a debug-log signal (`track_dropped` / `identify_dropped`),
+  and breadcrumb capacity is clamped to a safe minimum. This is the Swift idiom
+  of the cross-SDK invariant *"invalid input is rejected at the call site
+  without crashing the app, and never reaches the wire"* — Web/Node/RN signal
+  the same rejection by throwing a typed `CrossdeckError`; Swift drops + logs to
+  match its fire-and-forget surface (`identifyAndWait` remains the throwing
+  variant). Codified as the `invalid-input-rejected-natively` contract.
+- First Swift release verified by CI before publication — a new
+  `PublicAPIInputSafetyTests` suite proves every public fire-and-forget entry
+  point survives empty/garbage input in **both** Debug and Release
+  configuration.
+
 See https://cross-deck.com/docs/sdk-event-durability/ for the durability contract.
 
 ## [1.6.0] — 2026-06-10

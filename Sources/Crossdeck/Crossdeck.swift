@@ -732,26 +732,9 @@ public final class Crossdeck: @unchecked Sendable {
 
     // MARK: - Public API
 
-    /// Track a domain-specific event. Fire-and-forget; never throws.
+    /// Report a contract self-verification failure to the Crossdeck
+    /// reliability pipeline (never the customer's dashboard).
     ///
-    /// Validation behaviour:
-    ///   * Empty `name` is dropped with a debug log + an
-    ///     `assertionFailure` (loud in Debug builds, silent no-op
-    ///     in Release). Aligns with how Apple's first-party SDKs
-    ///     and every major analytics SDK (Mixpanel, Amplitude,
-    ///     Sentry, Firebase Analytics) shape their iOS surface —
-    ///     a typo'd event name should never propagate up the call
-    ///     stack and crash a customer's app.
-    ///   * Property values are sanitised in-place (NaN → null,
-    ///     strings > 1024 chars truncated, cyclic graphs replaced,
-    ///     etc.) with debug warnings. Never throws on a property.
-    ///   * Called after `stop()` → debug log + no-op.
-    ///
-    /// Cross-SDK contract: Web/Node/RN's `track()` throw in JavaScript
-    /// where uncaught throws propagate to the global error handler.
-    /// Swift's compile-time enforcement makes that pattern hostile —
-    /// every call site has to wrap in `try?`. The validation INTENT
-    /// is identical; only the signalling mechanism is Swift-idiomatic.
     /// Emit `crossdeck.contract_failed` to the Crossdeck reliability
     /// endpoint — single-fire, one-way, never visible in the
     /// customer's dashboard. Goes over a dedicated HTTP path with the
@@ -784,13 +767,41 @@ public final class Crossdeck: @unchecked Sendable {
         _DiagnosticTelemetry.send(payload: payload, session: options.urlSession)
     }
 
+    /// Track a domain-specific event. Fire-and-forget; never throws,
+    /// never traps.
+    ///
+    /// Validation behaviour (Swift idiom — see cross-SDK note below):
+    ///   * Empty `name` is **dropped with a debug log** (`track_dropped:
+    ///     missing_event_name`). It does NOT throw and does NOT trap —
+    ///     a typo'd event name must never propagate up the call stack or
+    ///     crash a customer's app. Matches how Apple's first-party SDKs
+    ///     and the major analytics SDKs (Mixpanel, Amplitude, Sentry,
+    ///     Firebase Analytics) shape their iOS surface.
+    ///   * Property values are sanitised in-place (NaN → null, strings
+    ///     > 1024 chars truncated, cyclic graphs replaced, etc.) with
+    ///     debug warnings. Never throws on a property.
+    ///   * Called after `stop()` → debug log + no-op.
+    ///
+    /// Cross-SDK contract — the invariant is uniform, the idiom is not:
+    /// every SDK rejects invalid input at the call site WITHOUT crashing
+    /// the host app, and invalid input never reaches the wire. Web/Node/RN
+    /// signal this by **throwing** a typed `CrossdeckError` synchronously
+    /// (a normal, catchable JS convention; an uncaught throw logs and the
+    /// app continues). Swift signals it by **dropping with a debug log** —
+    /// a throwing `track()` would force every call site to wrap in `try?`,
+    /// hostile on the hottest path and at odds with this SDK's
+    /// fire-and-forget surface. Both reject the same inputs; only the
+    /// signalling mechanism is platform-native.
     public func track(_ name: String, properties: [String: Any]? = nil) {
         guard isStarted() else {
             options.debugLogger(.sdkConfigured, ["track_dropped": "not_initialized", "event": name])
             return
         }
         guard !name.isEmpty else {
-            assertionFailure("[Crossdeck] track(name:) requires a non-empty name. Event dropped.")
+            // Graceful drop on the fire-and-forget path — an empty event name
+            // is handled, not fatal. Do NOT use assertionFailure here: it traps
+            // in debug builds and would crash a customer app that calls
+            // track(""). The debug signal below is the correct channel.
             options.debugLogger(.sdkConfigured, ["track_dropped": "missing_event_name"])
             return
         }
@@ -964,9 +975,11 @@ public final class Crossdeck: @unchecked Sendable {
     /// never throws. Same Swift-idiomatic non-throwing shape as
     /// `track()` — see that method's doc for the cross-SDK rationale.
     ///
-    /// Validation behaviour:
-    ///   * Empty `userId` is dropped with a debug log + an
-    ///     `assertionFailure` (loud in Debug, silent in Release).
+    /// Validation behaviour (Swift idiom):
+    ///   * Empty `userId` is **dropped with a debug log**
+    ///     (`identify_dropped: missing_user_id`). It does NOT throw and
+    ///     does NOT trap. The throwing variant that surfaces
+    ///     `missing_user_id` to callers is `identifyAndWait(userId:)`.
     ///   * Trait values are sanitised; never throws on a trait.
     ///   * Called after `stop()` → debug log + no-op.
     ///
@@ -1093,7 +1106,12 @@ public final class Crossdeck: @unchecked Sendable {
             return
         }
         guard !userId.isEmpty else {
-            assertionFailure("[Crossdeck] identify(userId:) requires a non-empty userId. Identify dropped.")
+            // Graceful drop on the fire-and-forget path — an empty userId is
+            // handled, not fatal. Do NOT use assertionFailure here: it traps in
+            // debug builds and would crash a customer app that calls
+            // identify(""). The debug signal below is the correct channel; the
+            // throwing identifyAndWait(userId:) is the surface that surfaces
+            // missing_user_id to callers who want to handle it.
             options.debugLogger(.sdkConfigured, ["identify_dropped": "missing_user_id"])
             return
         }

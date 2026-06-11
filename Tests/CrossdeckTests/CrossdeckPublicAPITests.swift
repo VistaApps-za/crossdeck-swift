@@ -9,12 +9,38 @@ import XCTest
 
 final class CrossdeckPublicAPITests: XCTestCase {
 
-    private func makeClient(storage: Storage? = nil) -> Crossdeck {
+    // Thread-safe sink for debug signals. Swift's public fire-and-forget API
+    // (track/identify) NEVER throws and NEVER traps — it drops+logs on invalid
+    // input or a stopped client. (This is the Swift IDIOM; the TS SDKs reject
+    // the same inputs by throwing a typed CrossdeckError — same invariant, no
+    // host-app crash, different signalling mechanism.) The Swift drop is
+    // observable ONLY via the debug logger, so these tests capture it rather
+    // than asserting a throw the surface never makes.
+    private final class DebugSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [(DebugSignal, [String: String])] = []
+        func record(_ signal: DebugSignal, _ payload: [String: String]) {
+            lock.lock(); entries.append((signal, payload)); lock.unlock()
+        }
+        func captured(key: String) -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            return entries.compactMap { $0.1[key] }
+        }
+    }
+
+    private func makeClient(storage: Storage? = nil, sink: DebugSink? = nil) -> Crossdeck {
+        let logger: DebugLogger
+        if let sink {
+            logger = { signal, payload in sink.record(signal, payload) }
+        } else {
+            logger = noopDebugLogger
+        }
         return try! Crossdeck.start(options: CrossdeckOptions(
             appId: "app_swift_tests",
             publicKey: "cd_pub_test_swiftunit",
             environment: .sandbox,
-            storage: storage ?? MemoryStorage()
+            storage: storage ?? MemoryStorage(),
+            debugLogger: logger
         ))
     }
 
@@ -90,41 +116,43 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     // MARK: - stop() rejects subsequent calls
 
-    func test_stop_rejectsSubsequentTrackCalls() {
-        let cd = makeClient()
+    func test_stop_dropsSubsequentTrackCalls() {
+        let sink = DebugSink()
+        let cd = makeClient(sink: sink)
         cd.stopSync()
-        XCTAssertThrowsError(try cd.track("post_stop_event")) { err in
-            let cd = err as? CrossdeckError
-            XCTAssertEqual(cd?.code, "not_initialized")
-        }
+        // Fire-and-forget: no throw, no crash — the call is dropped and the
+        // not_initialized reason is surfaced via the debug logger.
+        cd.track("post_stop_event")
+        XCTAssertEqual(sink.captured(key: "track_dropped"), ["not_initialized"])
     }
 
-    func test_stop_rejectsSubsequentIdentifyCalls() {
-        let cd = makeClient()
+    func test_stop_dropsSubsequentIdentifyCalls() {
+        let sink = DebugSink()
+        let cd = makeClient(sink: sink)
         cd.stopSync()
-        XCTAssertThrowsError(try cd.identify(userId: "u_1")) { err in
-            let cd = err as? CrossdeckError
-            XCTAssertEqual(cd?.code, "not_initialized")
-        }
+        cd.identify(userId: "u_1")
+        XCTAssertEqual(sink.captured(key: "identify_dropped"), ["not_initialized"])
     }
 
     func test_stop_isIdempotent() {
-        let cd = makeClient()
+        let sink = DebugSink()
+        let cd = makeClient(sink: sink)
         cd.stopSync()
         cd.stopSync()  // second call must not crash
-        // Still rejects after multiple stops.
-        XCTAssertThrowsError(try cd.track("e"))
+        // Still drops after multiple stops.
+        cd.track("e")
+        XCTAssertEqual(sink.captured(key: "track_dropped"), ["not_initialized"])
     }
 
     // MARK: - track validation
 
-    func test_track_rejectsEmptyName() {
-        let cd = makeClient()
+    func test_track_dropsEmptyName() {
+        let sink = DebugSink()
+        let cd = makeClient(sink: sink)
         defer { cd.stopSync() }
-        XCTAssertThrowsError(try cd.track("")) { err in
-            let cd = err as? CrossdeckError
-            XCTAssertEqual(cd?.code, "missing_event_name")
-        }
+        // Empty name is a defined drop — track() NEVER throws or traps.
+        cd.track("")
+        XCTAssertEqual(sink.captured(key: "track_dropped"), ["missing_event_name"])
     }
 
     func test_track_sanitisesNaNProperty_doesNotThrow() {
@@ -139,12 +167,28 @@ final class CrossdeckPublicAPITests: XCTestCase {
 
     // MARK: - identify validation
 
-    func test_identify_rejectsEmptyId() {
+    // The fire-and-forget identify(userId:) is non-throwing: an empty
+    // userId is a defined, handled drop (matches Web/Node/RN). It must
+    // NOT crash and must NOT throw — the only signal is the debug logger.
+    func test_identify_emptyId_dropsWithoutCrashing() {
         let cd = makeClient()
         defer { cd.stopSync() }
-        XCTAssertThrowsError(try cd.identify(userId: "")) { err in
-            let cd = err as? CrossdeckError
-            XCTAssertEqual(cd?.code, "missing_user_id")
+        // No throw, no trap — just a silent, defined drop.
+        cd.identify(userId: "")
+    }
+
+    // The throwing identifyAndWait(userId:) is the surface that rejects an
+    // empty userId with code missing_user_id for callers who want to handle it.
+    func test_identifyAndWait_rejectsEmptyId() async {
+        let cd = makeClient()
+        defer { cd.stopSync() }
+        do {
+            _ = try await cd.identifyAndWait(userId: "")
+            XCTFail("expected identifyAndWait to throw for empty userId")
+        } catch let err as CrossdeckError {
+            XCTAssertEqual(err.code, "missing_user_id")
+        } catch {
+            XCTFail("expected CrossdeckError, got \(error)")
         }
     }
 }

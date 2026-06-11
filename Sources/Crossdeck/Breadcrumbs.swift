@@ -61,10 +61,15 @@ public actor Breadcrumbs {
     private let capacity: Int
 
     public init(capacity: Int = defaultBreadcrumbCapacity) {
-        precondition(capacity > 0, "Breadcrumb capacity must be > 0")
-        self.capacity = capacity
+        // Clamp, never trap. `capacity` flows from the customer-settable
+        // CrossdeckOptions.breadcrumbCapacity, so a 0 or negative value is
+        // customer-reachable input — `precondition` would crash the host app
+        // at Crossdeck.start() in a RELEASE build. Coerce to a safe minimum
+        // instead (drop-and-sanitise, matching every other public surface).
+        let safeCapacity = max(1, capacity)
+        self.capacity = safeCapacity
         self.buffer = []
-        self.buffer.reserveCapacity(capacity)
+        self.buffer.reserveCapacity(safeCapacity)
     }
 
     public func add(_ crumb: Breadcrumb) {
