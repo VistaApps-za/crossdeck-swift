@@ -4,6 +4,18 @@ All notable changes to `@cross-deck/swift` will be documented in
 this file. Format follows [Keep a Changelog](https://keepachangelog.com/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] — 2026-06-12
+
+### Fixed
+
+- A sign-in racing a first purchase could lose the freshly minted
+  `appAccountToken`: `identify()` paths writing identity state from the
+  actor could overwrite the token before it reconciled, so a later call
+  minted a different value than the one Apple recorded on the purchase.
+  Identity writers now fold the latest state in first — the token a
+  purchase stamps is always the token the SDK keeps. The full
+  mint-once / persist / wipe-on-reset lifecycle is now pinned by tests.
+
 ## [1.7.1] — 2026-06-11
 
 Docs-only patch — no code changes.

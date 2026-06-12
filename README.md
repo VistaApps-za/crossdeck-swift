@@ -2,7 +2,7 @@
 
 The Crossdeck SDK for iOS, iPadOS, macOS, tvOS, and watchOS.
 
-> **Status: v1.7.0 — PARK on version-rejection + machine-tested
+> **Status: v1.7.2 — PARK on version-rejection + machine-tested
 > input safety.** If the server ever stops accepting this SDK
 > version's event format (HTTP `426` / `sdk_version_unsupported`),
 > events are **parked, not lost** — held on-disk, flushing hushes,
@@ -199,7 +199,7 @@ let strict = CrossdeckOptions(
    https://github.com/VistaApps-za/crossdeck-swift.git
    ```
 
-3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.7.0`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
+3. In the **Dependency Rule** dropdown on the right, select **"Up to Next Major Version"** and enter `1.7.2`. Do **not** leave it set to **"Branch: main"** — branch tracking auto-pulls every commit including breaking changes when v2.0.0 lands. The Major-Version rule gives you patch + minor updates automatically and lets you choose when to take breaking changes.
 4. Click **Add Package**. Xcode resolves the package and offers to add the `Crossdeck` library product to your app target — accept.
 
 > **If your Xcode UI already shows `Dependency Rule: Branch — main` from a pre-v1.0.0 add**, the *File → Add Package Dependencies…* dialog is hard-blocked from changing rules on already-added packages — the Dependency Rule dropdown greys out with "already depends on … with rule main" at the bottom. Removing and re-adding usually loops, too: Xcode's *Recently Used* auto-suggests the package back in with the dropdown still greyed.
@@ -210,7 +210,7 @@ let strict = CrossdeckOptions(
 > 2. In the editor pane, select your project under the **PROJECT** column — **not** under TARGETS (the rule editor only lives on the project, not the target).
 > 3. Click the **Package Dependencies** tab.
 > 4. **Double-click** the `crossdeck-swift` row. A sheet opens with the Dependency Rule editor — this is the only UI in Xcode that can change a rule on an already-added package.
-> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.7.0`, click `Done`.
+> 5. Change `Branch` → `Up to Next Major Version`, set the version to `1.7.2`, click `Done`.
 >
 > If double-click doesn't open the sheet, try right-click → *Modify Package Settings* (label varies by Xcode version).
 >
@@ -222,12 +222,12 @@ let strict = CrossdeckOptions(
 dependencies: [
     .package(
         url: "https://github.com/VistaApps-za/crossdeck-swift.git",
-        from: "1.7.0"
+        from: "1.7.2"
     ),
 ]
 ```
 
-`from: "1.7.0"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
+`from: "1.7.2"` is shorthand for "Up to Next Major Version" — same rule as the Xcode picker.
 
 ## Quickstart
 

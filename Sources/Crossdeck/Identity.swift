@@ -146,6 +146,13 @@ public actor Identity {
     /// Set the developerUserId. Idempotent — calling with the same
     /// id twice is a no-op (no storage write).
     public func setDeveloperUserId(_ id: String?) -> Bool {
+        // Fold the sync mirror in BEFORE composing a full-snapshot write.
+        // The nonisolated purchase path mints appAccountToken into the
+        // mirror first and reconciles the actor asynchronously — writing
+        // from stale actor state here would clobber a just-minted token
+        // (Shape 2 reborn through a race; caught by
+        // AppAccountTokenLifecycleTests.test_subsequentCalls_*).
+        reconcileFromSyncBox()
         let normalised = id?.trimmingCharacters(in: .whitespacesAndNewlines)
         let next: String? = (normalised?.isEmpty == false) ? normalised : nil
         if next == developerUserId { return false }
@@ -168,6 +175,7 @@ public actor Identity {
     /// response handler — the server returns the canonical cdcust_
     /// and we persist it for the lifetime of the install.
     public func setCrossdeckCustomerId(_ id: String?) -> Bool {
+        reconcileFromSyncBox() // same clobber guard as setDeveloperUserId
         let normalised = id?.trimmingCharacters(in: .whitespacesAndNewlines)
         let next: String? = (normalised?.isEmpty == false) ? normalised : nil
         if next == crossdeckCustomerId { return false }
@@ -302,6 +310,10 @@ public actor Identity {
     /// purchases — `nil` is the default, present only after the
     /// purchase path mints one.
     public func snapshot() -> IdentitySnapshot {
+        // The mirror is written first by every nonisolated mutator; fold it
+        // in so a snapshot taken between mint and async reconcile still
+        // carries the token (the alias request body is built from this).
+        reconcileFromSyncBox()
         return IdentitySnapshot(
             anonymousId: anonymousId,
             developerUserId: developerUserId,
